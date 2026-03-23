@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>三省六部 · 旅行规划系统</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- Hero Banner -->
+<header class="hero">
+    <div class="hero-content">
+        <h1>&#x1F3EF; 三省六部 · 旅行规划系统</h1>
+        <p>基于古代中国政府架构的多智能体旅行规划 &#x2708;&#xFE0F; &#x1F5FA;&#xFE0F; &#x1F30F;</p>
+    </div>
+</header>
+
+<main class="container">
+
+<!-- Input Form -->
+<section id="form-section" class="card">
+    <h2>&#x1F4DD; 旅行需求</h2>
+    <form id="plan-form">
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="origin_city">出发城市</label>
+                <input type="text" id="origin_city" required placeholder="例：北京" value="北京">
+            </div>
+            <div class="form-group">
+                <label for="destination">目的地</label>
+                <input type="text" id="destination" required placeholder="例：东京" value="东京">
+            </div>
+            <div class="form-group">
+                <label for="start_date">出发日期</label>
+                <input type="date" id="start_date" required>
+            </div>
+            <div class="form-group">
+                <label for="end_date">返回日期</label>
+                <input type="date" id="end_date" required>
+            </div>
+            <div class="form-group">
+                <label for="adults">成人人数</label>
+                <input type="number" id="adults" min="1" max="20" value="2">
+            </div>
+            <div class="form-group">
+                <label for="children">儿童人数</label>
+                <input type="number" id="children" min="0" max="20" value="0">
+            </div>
+            <div class="form-group">
+                <label for="budget_level">预算等级</label>
+                <select id="budget_level">
+                    <option value="budget">经济型</option>
+                    <option value="mid_range" selected>中等</option>
+                    <option value="luxury">豪华</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="total_budget">总预算</label>
+                <input type="number" id="total_budget" min="0" step="100" placeholder="例：5000">
+            </div>
+            <div class="form-group">
+                <label for="currency">货币</label>
+                <select id="currency">
+                    <option value="USD">USD</option>
+                    <option value="CNY" selected>CNY</option>
+                    <option value="JPY">JPY</option>
+                    <option value="EUR">EUR</option>
+                    <option value="GBP">GBP</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="pace">旅行节奏</label>
+                <select id="pace">
+                    <option value="relaxed">休闲</option>
+                    <option value="balanced" selected>均衡</option>
+                    <option value="structured">紧凑</option>
+                </select>
+            </div>
+            <div class="form-group full-width">
+                <label for="interests">兴趣标签（逗号分隔）</label>
+                <input type="text" id="interests" placeholder="例：美食, 文化, 自然风光" value="美食, 文化, 城市漫步">
+            </div>
+            <div class="form-group full-width">
+                <label for="constraints">特殊要求（逗号分隔）</label>
+                <input type="text" id="constraints" placeholder="例：无障碍设施, 素食餐厅">
+            </div>
+            <div class="form-group full-width">
+                <label for="user_message">旅行描述</label>
+                <textarea id="user_message" rows="3" placeholder="描述你理想中的旅行...">请规划一次结构清晰、物流合理的旅行方案。</textarea>
+            </div>
+        </div>
+        <button type="submit" id="submit-btn" class="btn-primary">&#x1F680; 开始规划</button>
+    </form>
+</section>
+
+<!-- Workflow Visualization -->
+<section id="workflow-section" class="card" style="display:none;">
+    <h2>&#x2699;&#xFE0F; 工作流进度</h2>
+    <div class="pipeline">
+        <div class="pipeline-row main-pipeline">
+            <div class="node" data-step="shangshu_preflight">
+                <div class="node-icon">&#x1F3DB;&#xFE0F;</div>
+                <div class="node-label">尚书省·预检</div>
+            </div>
+            <div class="arrow">&rarr;</div>
+            <div class="node" data-step="zhongshu_itinerary">
+                <div class="node-icon">&#x1F4DC;</div>
+                <div class="node-label">中书省·草案</div>
+            </div>
+            <div class="arrow">&rarr;</div>
+            <div class="node" data-step="menxia_review">
+                <div class="node-icon">&#x1F50D;</div>
+                <div class="node-label">门下省·审核</div>
+            </div>
+            <div class="arrow">&rarr;</div>
+            <div class="node" data-step="shangshu_review_gate">
+                <div class="node-icon">&#x2696;&#xFE0F;</div>
+                <div class="node-label">尚书省·审批</div>
+            </div>
+        </div>
+        <div class="pipeline-connector">&darr;</div>
+        <div class="pipeline-row bureau-pipeline">
+            <div class="node" data-step="liubu_weather">
+                <div class="node-icon">&#x1F324;&#xFE0F;</div>
+                <div class="node-label">天气部</div>
+            </div>
+            <div class="node" data-step="liubu_budget">
+                <div class="node-icon">&#x1F4B0;</div>
+                <div class="node-label">预算部</div>
+            </div>
+            <div class="node" data-step="liubu_accommodation">
+                <div class="node-icon">&#x1F3E8;</div>
+                <div class="node-label">住宿部</div>
+            </div>
+            <div class="node" data-step="liubu_flight_transport">
+                <div class="node-icon">&#x2708;&#xFE0F;</div>
+                <div class="node-label">交通部</div>
+            </div>
+            <div class="node" data-step="liubu_calendar">
+                <div class="node-icon">&#x1F4C5;</div>
+                <div class="node-label">日历部</div>
+            </div>
+        </div>
+        <div class="pipeline-connector">&darr;</div>
+        <div class="pipeline-row main-pipeline">
+            <div class="node" data-step="shangshu_assemble">
+                <div class="node-icon">&#x1F4E6;</div>
+                <div class="node-label">尚书省·组装</div>
+            </div>
+            <div class="arrow">&rarr;</div>
+            <div class="node node-final" data-step="done">
+                <div class="node-icon">&#x2705;</div>
+                <div class="node-label">完成</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Log Panel -->
+    <div class="log-panel">
+        <div class="log-header">&#x1F4CB; 实时日志</div>
+        <div id="log-content" class="log-content"></div>
+    </div>
+</section>
+
+<!-- Result Section -->
+<section id="result-section" class="card" style="display:none;">
+    <h2>&#x1F389; 旅行方案</h2>
+    <div id="result-content"></div>
+</section>
+
+<!-- Human Intervene Section -->
+<section id="intervene-section" class="card" style="display:none;">
+    <h2>&#x26A0;&#xFE0F; 需要您的确认</h2>
+    <div id="intervene-question" class="intervene-question"></div>
+    <form id="intervene-form">
+        <div class="form-group">
+            <label for="intervene-message">您的回复</label>
+            <textarea id="intervene-message" rows="3"></textarea>
+        </div>
+        <div class="form-group">
+            <label for="intervene-budget">补充总预算（可选）</label>
+            <input type="number" id="intervene-budget" min="0" step="100">
+        </div>
+        <button type="submit" class="btn-primary">&#x1F4E8; 提交并继续</button>
+    </form>
+</section>
+
+<!-- Rejected Section -->
+<section id="rejected-section" class="card" style="display:none;">
+    <h2>&#x274C; 规划被拒绝</h2>
+    <div id="rejected-content"></div>
+    <button onclick="resetForm()" class="btn-primary">&#x1F504; 重新规划</button>
+</section>
+
+</main>
+
+<footer class="footer">
+    <p>三省六部 · 多智能体旅行规划系统 — Powered by LangGraph &amp; FastAPI</p>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
