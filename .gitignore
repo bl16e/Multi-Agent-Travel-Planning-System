@@ -29,8 +29,8 @@ package-lock.json
 # Output files
 artifacts/
 *.png
-*.md
 output.txt
+travel_plan.md
 
 # Testing
 .pytest_cache/
