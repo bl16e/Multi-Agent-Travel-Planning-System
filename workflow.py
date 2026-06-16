@@ -17,6 +17,7 @@ from provinces.menxia_review.graph import MenxiaReviewAgent
 from provinces.shangshu_orchestrator.orchestrator import ShangshuOrchestrator, ShangshuWorkflowContext
 from provinces.zhongshu_itinerary.graph import ZhongshuItineraryAgent
 from utils.permission_matrix import AgentRole
+from utils.path_safety import sanitize_request_id
 from utils.schemas import (
     AccommodationExecutionResult,
     BudgetExecutionResult,
@@ -421,7 +422,7 @@ def collect_booking_links(draft_packet: dict[str, Any], execution_results: dict[
 
 def build_markdown(request: PlanningRequest, draft_packet: dict[str, Any], review_packet: dict[str, Any], execution_results: dict[str, Any], dashboard_url: str, artifact_dir: Path) -> Path:
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    path = artifact_dir / f"{request.request_id}_travel_plan.md"
+    path = artifact_dir / f"{sanitize_request_id(request.request_id)}_travel_plan.md"
     itinerary = draft_packet["itinerary_draft"]
     weather = execution_results.get("WEATHER", {})
     budget = execution_results.get("BUDGET", {})

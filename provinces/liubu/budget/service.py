@@ -83,7 +83,7 @@ class BudgetBureau:
             {"category": "misc", "item": "Buffer and incidentals", "estimated_cost": round(max(activity_total * 0.2, 50), 2), "currency": currency, "notes": state.get("research_notes", "Fallback budget synthesis.")},
         ]
         total = round(sum(item["estimated_cost"] for item in line_items), 2)
-        warnings = ["Budget output fell back because MCP or structured synthesis failed."]
+        warnings = ["Budget output fell back because MCP or structured synthesis failed.", "Estimated fallback; did not use real-time data."]
         if total_budget is not None and total > float(total_budget):
             warnings.append("Estimated trip cost exceeds the declared budget cap.")
         return {"result": BudgetExecutionResult(currency=currency, budget_breakdown=line_items, total_estimated_cost=total, warnings=warnings).model_dump(mode="json")}

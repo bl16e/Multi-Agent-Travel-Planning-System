@@ -9,6 +9,7 @@ from langgraph.graph import END, StateGraph
 
 from utils.agent_runtime import run_react_mcp_task, soul_path_for
 from utils.icalendar_utils import build_ics_calendar
+from utils.path_safety import sanitize_request_id
 from utils.schemas import CalendarEventModel, CalendarExecutionResult
 from utils.llm_factory import build_qwen_chat
 
@@ -84,7 +85,7 @@ class CalendarBureau:
 
     async def write_calendar(self, state: CalendarState) -> dict[str, Any]:
         payload = state["payload"]
-        output_path = self.output_dir / f"{payload.get('request_id', 'trip')}_trip_calendar.ics"
+        output_path = self.output_dir / f"{sanitize_request_id(payload.get('request_id', 'trip'))}_trip_calendar.ics"
         events = [CalendarEventModel.model_validate(item) for item in state.get("events", [])]
         build_ics_calendar(f"{state['destination']} Travel Plan", events, output_path)
         return {"result": CalendarExecutionResult(calendar_file=output_path, events_created=len(events), calendar_name=f"{state['destination']} Travel Plan").model_dump(mode="json")}

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.agents import create_agent
+from langgraph.prebuilt import create_react_agent
 
 from utils.llm_factory import build_qwen_chat
 from utils.mcp_client import load_mcp_tools
@@ -30,6 +31,8 @@ async def run_react_mcp_task(
     invoke_timeout_seconds: float = DEFAULT_AGENT_INVOKE_TIMEOUT_SECONDS,
 ) -> str:
     llm = build_qwen_chat()
+    if llm is None:
+        return FALLBACK_MESSAGE
     try:
         tools = await asyncio.wait_for(load_mcp_tools(server_names), timeout=tool_load_timeout_seconds)
     except asyncio.TimeoutError:
@@ -38,10 +41,10 @@ async def run_react_mcp_task(
         return f"{FALLBACK_MESSAGE} MCP tool loading failed: {exc}"
     prompt = load_soul_prompt(soul_path)
 
-    if llm is None or not tools:
+    if not tools:
         return FALLBACK_MESSAGE
 
-    agent = create_agent(model=llm, tools=tools, system_prompt=prompt)
+    agent = create_react_agent(model=llm, tools=tools, prompt=prompt)
     try:
         result = await asyncio.wait_for(agent.ainvoke({"messages": [("user", user_task)]}), timeout=invoke_timeout_seconds)
     except asyncio.TimeoutError:
@@ -64,7 +67,7 @@ async def run_structured_synthesis(
 ) -> Any:
     llm = build_qwen_chat()
     if llm is None:
-        raise RuntimeError("LLM unavailable for structured synthesis.")
+        return _offline_structured_output(output_model, variables)
     structured = llm.with_structured_output(output_model)
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -80,3 +83,87 @@ async def run_structured_synthesis(
 
 def soul_path_for(file_path: str | Path) -> Path:
     return Path(file_path).with_name("SOUL.md")
+
+
+def _offline_structured_output(output_model: Any, variables: dict[str, Any]) -> Any:
+    model_name = getattr(output_model, "__name__", "")
+    if model_name == "ItineraryDraftModel":
+        return _offline_itinerary_draft(output_model, variables)
+    raise RuntimeError("LLM unavailable for structured synthesis.")
+
+
+def _offline_itinerary_draft(output_model: Any, variables: dict[str, Any]) -> Any:
+    destination = str(variables.get("destination") or "Destination")
+    start = _parse_date(variables.get("start_date")) or date.today()
+    end = _parse_date(variables.get("end_date")) or start
+    day_count = max((end - start).days + 1, 1)
+    interests = [item.strip() for item in str(variables.get("interests") or "sightseeing").split(",") if item.strip()]
+    if not interests:
+        interests = ["sightseeing"]
+
+    daily_plan = []
+    for index in range(day_count):
+        current = start + timedelta(days=index)
+        interest = interests[index % len(interests)]
+        daily_plan.append(
+            {
+                "day_index": index + 1,
+                "date": current,
+                "city": destination,
+                "theme": f"{destination} {interest}",
+                "summary": "Estimated offline itinerary block; not validated with real-time availability.",
+                "activities": [
+                    {
+                        "start_time": "09:00",
+                        "end_time": "11:30",
+                        "title": f"{destination} orientation walk",
+                        "location_name": f"Central {destination}",
+                        "description": "Fallback activity generated without live search data.",
+                        "estimated_cost": 0,
+                        "status": "pending",
+                    },
+                    {
+                        "start_time": "14:00",
+                        "end_time": "16:30",
+                        "title": f"{interest.title()} focused visit",
+                        "location_name": destination,
+                        "description": "Estimated attraction slot; confirm opening hours before booking.",
+                        "estimated_cost": 40,
+                        "status": "pending",
+                    },
+                ],
+                "accommodation_note": "Choose a central base near primary transit.",
+            }
+        )
+
+    return output_model.model_validate(
+        {
+            "destination": destination,
+            "overview": "Offline fallback itinerary generated because live LLM/MCP synthesis was unavailable.",
+            "trip_style": "balanced",
+            "daily_plan": daily_plan,
+            "planning_notes": [
+                "Did not use real-time data; verify hours, prices, and booking availability.",
+                str(variables.get("research_context") or ""),
+            ],
+            "pending_confirmations": [
+                "Confirm final accommodation booking before issuing the calendar bundle.",
+                "Confirm one primary paid attraction per day to reduce queue risk.",
+            ],
+            "risk_flags": [
+                "Opening hours and ticket availability may change and must be reviewed downstream.",
+                "Weather suitability is not yet validated and may alter outdoor blocks.",
+            ],
+        }
+    )
+
+
+def _parse_date(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None

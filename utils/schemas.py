@@ -50,7 +50,13 @@ class TravelerProfile(BaseModel):
 
 
 class PlanningRequest(BaseModel):
-    request_id: str
+    request_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9_.-]+$",
+        description="Stable request identifier using only letters, digits, underscore, dash, and dot.",
+    )
     user_message: str
     profile: TravelerProfile
 

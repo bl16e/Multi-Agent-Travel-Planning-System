@@ -14,6 +14,9 @@ from pydantic import BaseModel, Field
 
 from utils.schemas import FinalTravelPackageModel, PlanningRequest
 from utils.markdown_formatter import format_package_to_markdown
+from utils.path_safety import sanitize_request_id
+from utils.session_store import CorruptSessionError, JsonSessionStore, SessionStore, StoredSession
+from utils.settings import get_settings
 from workflow import ProvinceWorkflow
 
 
@@ -27,35 +30,42 @@ class ThreeProvinceTravelSystem:
         self,
         artifact_dir: str | Path | None = None,
         progress_reporter: Callable[[str], None] | None = None,
+        session_store: SessionStore | None = None,
     ) -> None:
         self.workflow = ProvinceWorkflow(artifact_dir=artifact_dir, progress_reporter=progress_reporter)
         self.sessions: dict[str, dict[str, Any]] = {}
+        self.session_store = session_store or JsonSessionStore(get_settings().session_store_dir)
 
     async def plan_trip(self, request: PlanningRequest, human_resume: HumanResumePayload | None = None) -> FinalTravelPackageModel | dict[str, Any]:
         effective_request = self._merge_request(request, human_resume)
         result = await self.workflow.run(effective_request)
-        self.sessions[effective_request.request_id] = {"request": effective_request, "context": result.get("context"), "status": result.get("status", "UNKNOWN"), "result": result}
+        session = {"request": effective_request, "context": result.get("context"), "status": result.get("status", "UNKNOWN"), "result": result}
+        self.sessions[effective_request.request_id] = session
         if result.get("status") == "DONE":
             package = FinalTravelPackageModel.model_validate(result["final_package"])
-            self.sessions[effective_request.request_id]["package"] = package
+            session["package"] = package
+            self._persist_session(effective_request.request_id, session)
             return package
+        self._persist_session(effective_request.request_id, session)
         if result.get("status") == "REJECTED":
             return result.get("rejected_payload", result)
-        return {"status": result.get("status", "HUMAN_INTERVENE"), "request_id": effective_request.request_id, "question": result.get("question"), "dashboard_url": self.workflow.orchestrator.build_dashboard_link(result["context"]), "progress_events": result["context"].progress_events if result.get("context") else []}
+        context = result.get("context")
+        return {"status": result.get("status", "HUMAN_INTERVENE"), "request_id": effective_request.request_id, "question": result.get("question"), "dashboard_url": self.workflow.orchestrator.build_dashboard_link(context) if context else None, "progress_events": context.progress_events if context else []}
 
     async def resume_trip(self, request_id: str, payload: HumanResumePayload) -> FinalTravelPackageModel | dict[str, Any]:
-        session = self.sessions.get(request_id)
+        session = self.sessions.get(request_id) or self._load_session(request_id)
         if not session:
             raise KeyError(f"Unknown request_id: {request_id}")
         request: PlanningRequest = session["request"]
         return await self.plan_trip(request, human_resume=payload)
 
     def dashboard_snapshot(self, request_id: str) -> dict[str, Any]:
-        session = self.sessions.get(request_id)
+        session = self.sessions.get(request_id) or self._load_session(request_id)
         if not session:
             raise KeyError(request_id)
         context = session.get("context")
-        return {"request_id": request_id, "status": session.get("status"), "current_state": context.current_state.value if context else None, "pending_user_inputs": context.pending_user_inputs if context else [], "progress_events": context.progress_events if context else [], "has_package": "package" in session}
+        context_snapshot = session.get("context_snapshot") or self._context_snapshot(context)
+        return {"request_id": request_id, "status": session.get("status"), "current_state": context_snapshot.get("current_state"), "pending_user_inputs": context_snapshot.get("pending_user_inputs", []), "progress_events": context_snapshot.get("progress_events", []), "has_package": "package" in session and session.get("package") is not None}
 
     def _merge_request(self, request: PlanningRequest, human_resume: HumanResumePayload | None) -> PlanningRequest:
         if human_resume is None:
@@ -68,8 +78,51 @@ class ThreeProvinceTravelSystem:
             data["user_message"] = human_resume.user_message
         return PlanningRequest.model_validate(data)
 
+    def _persist_session(self, request_id: str, session: dict[str, Any]) -> None:
+        package = session.get("package")
+        self.session_store.save(
+            StoredSession(
+                request_id=request_id,
+                request=session["request"].model_dump(mode="json"),
+                status=session.get("status", "UNKNOWN"),
+                context_snapshot=self._context_snapshot(session.get("context")),
+                result=self._serializable_result(session.get("result", {})),
+                package=package.model_dump(mode="json") if hasattr(package, "model_dump") else package,
+            )
+        )
 
-DEFAULT_ARTIFACT_DIR = Path(__file__).resolve().with_name("artifacts")
+    def _load_session(self, request_id: str) -> dict[str, Any] | None:
+        stored = self.session_store.load(request_id)
+        if stored is None:
+            return None
+        session: dict[str, Any] = {
+            "request": PlanningRequest.model_validate(stored.request),
+            "status": stored.status,
+            "context_snapshot": stored.context_snapshot,
+            "result": stored.result,
+        }
+        if stored.package is not None:
+            session["package"] = FinalTravelPackageModel.model_validate(stored.package)
+        self.sessions[request_id] = session
+        return session
+
+    def _context_snapshot(self, context: Any | None) -> dict[str, Any]:
+        if context is None:
+            return {}
+        current_state = getattr(getattr(context, "current_state", None), "value", None)
+        return {
+            "current_state": current_state,
+            "pending_user_inputs": list(getattr(context, "pending_user_inputs", []) or []),
+            "progress_events": list(getattr(context, "progress_events", []) or []),
+        }
+
+    def _serializable_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        serialized = dict(result)
+        serialized.pop("context", None)
+        return serialized
+
+
+DEFAULT_ARTIFACT_DIR = Path(get_settings().output_dir)
 
 # Shared session store across all per-request ThreeProvinceTravelSystem instances
 _shared_sessions: dict[str, dict[str, Any]] = {}
@@ -147,7 +200,10 @@ async def plan_stream(request: PlanningRequest):
 
 @app.post("/resume/{request_id}/stream")
 async def resume_stream(request_id: str, payload: HumanResumePayload):
-    session = _shared_sessions.get(request_id)
+    try:
+        session = _shared_sessions.get(request_id) or system._load_session(request_id)
+    except CorruptSessionError as exc:
+        raise HTTPException(status_code=409, detail="Stored session is corrupt") from exc
     if not session:
         raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}")
 
@@ -196,9 +252,12 @@ async def resume_stream(request_id: str, payload: HumanResumePayload):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-@app.get("/download/{request_id}")
+@app.get("/download/{request_id:path}")
 async def download_artifact(request_id: str):
-    safe_id = request_id.replace("/", "").replace("\\", "").replace("..", "")
+    try:
+        safe_id = sanitize_request_id(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Artifact not found") from exc
     md_path = DEFAULT_ARTIFACT_DIR / f"{safe_id}_travel_plan.md"
     if md_path.exists():
         return FileResponse(md_path, filename=md_path.name, media_type="text/markdown")
@@ -217,6 +276,8 @@ async def plan_trip(request: PlanningRequest) -> Any:
 async def resume_trip(request_id: str, payload: HumanResumePayload) -> Any:
     try:
         return await system.resume_trip(request_id, payload)
+    except CorruptSessionError as exc:
+        raise HTTPException(status_code=409, detail="Stored session is corrupt") from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -225,6 +286,8 @@ async def resume_trip(request_id: str, payload: HumanResumePayload) -> Any:
 async def dashboard(request_id: str) -> dict[str, Any]:
     try:
         return system.dashboard_snapshot(request_id)
+    except CorruptSessionError as exc:
+        raise HTTPException(status_code=409, detail="Stored session is corrupt") from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}") from exc
 

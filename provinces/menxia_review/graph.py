@@ -38,7 +38,7 @@ class MenxiaReviewAgent:
         return graph.compile()
 
     async def ingest_draft(self, state: MenxiaState) -> dict[str, Any]:
-        packet = ZhongshuDraftPacketModel.model_validate(state["draft"])
+        packet = ZhongshuDraftPacketModel.model_validate(self._normalize_draft_packet(state["draft"]))
         return {"parsed_draft": packet.model_dump(mode="json")}
 
     async def review_draft(self, state: MenxiaState) -> dict[str, Any]:
@@ -60,7 +60,7 @@ class MenxiaReviewAgent:
         return {"user_request": user_request}
 
     async def verdict(self, state: MenxiaState) -> dict[str, Any]:
-        packet = ZhongshuDraftPacketModel.model_validate(state["parsed_draft"])
+        packet = ZhongshuDraftPacketModel.model_validate(self._normalize_draft_packet(state["parsed_draft"]))
         profile = state.get("user_request", {}).get("profile", {})
 
         gov_dict = packet.governance.model_dump() if hasattr(packet.governance, 'model_dump') else packet.governance
@@ -69,28 +69,31 @@ class MenxiaReviewAgent:
         if profile.get("total_budget") is None:
             verdict = ReviewVerdictModel(verdict="HUMAN_INTERVENE", summary="预算信息缺失，需要用户确认。", blocking_issues=["总预算未设置"], human_questions=["请提供旅行总预算"], review_notes=[])
         else:
-            verdict = await run_structured_synthesis(
-                soul_path=self.soul_path,
-                output_model=ReviewVerdictModel,
-                user_prompt=(
-                    "审核中书省提交的行程草案，返回结构化审核结果。\n"
-                    "草案内容: {draft}\n"
-                    "用户需求: {user_request}\n\n"
-                    "审核标准：\n"
-                    "- 是否包含具体景点名称（非泛指区域）\n"
-                    "- 是否有真实预订链接\n"
-                    "- 是否有交通细节和时长\n"
-                    "- 是否有天气应急方案\n\n"
-                    "重要：你只能返回 APPROVED（通过）或 REJECTED（拒绝）。\n"
-                    "不要返回 HUMAN_INTERVENE，预订确认、餐厅预约等执行细节不需要用户介入。\n"
-                    "如果草案质量不足，使用 REJECTED 并在 revision_requests 中说明需要修改的内容。"
-                ),
-                variables={
-                    "draft": str(packet.model_dump(mode="json")),
-                    "user_request": str(state.get("user_request", {})),
-                },
-                timeout_seconds=200.0,
-            )
+            try:
+                verdict = await run_structured_synthesis(
+                    soul_path=self.soul_path,
+                    output_model=ReviewVerdictModel,
+                    user_prompt=(
+                        "审核中书省提交的行程草案，返回结构化审核结果。\n"
+                        "草案内容: {draft}\n"
+                        "用户需求: {user_request}\n\n"
+                        "审核标准：\n"
+                        "- 是否包含具体景点名称（非泛指区域）\n"
+                        "- 是否有真实预订链接\n"
+                        "- 是否有交通细节和时长\n"
+                        "- 是否有天气应急方案\n\n"
+                        "重要：你只能返回 APPROVED（通过）或 REJECTED（拒绝）。\n"
+                        "不要返回 HUMAN_INTERVENE，预订确认、餐厅预约等执行细节不需要用户介入。\n"
+                        "如果草案质量不足，使用 REJECTED 并在 revision_requests 中说明需要修改的内容。"
+                    ),
+                    variables={
+                        "draft": str(packet.model_dump(mode="json")),
+                        "user_request": str(state.get("user_request", {})),
+                    },
+                    timeout_seconds=200.0,
+                )
+            except RuntimeError:
+                verdict = self._offline_verdict(packet)
             # Guard: AI should not return HUMAN_INTERVENE; downgrade to REJECTED
             if verdict.verdict == "HUMAN_INTERVENE":
                 verdict = ReviewVerdictModel(
@@ -122,3 +125,46 @@ class MenxiaReviewAgent:
             "review_notes": verdict.review_notes,
         })
         return {"verdict_payload": packet_out.model_dump(mode="json")}
+
+    def _offline_verdict(self, packet: ZhongshuDraftPacketModel) -> ReviewVerdictModel:
+        daily_plan = packet.itinerary_draft.daily_plan
+        if not daily_plan:
+            return ReviewVerdictModel(
+                verdict="REJECTED",
+                summary="Offline deterministic review rejected the draft because it has no daily plan.",
+                blocking_issues=["Daily plan is empty."],
+                revision_requests=["Add at least one day with concrete activities."],
+                approved_bureaus=[],
+                review_notes=["Did not use real-time LLM review."],
+            )
+
+        missing_activity_days = [str(day.day_index) for day in daily_plan if not day.activities]
+        if missing_activity_days:
+            return ReviewVerdictModel(
+                verdict="REJECTED",
+                summary="Offline deterministic review rejected the draft because one or more days have no activities.",
+                blocking_issues=[f"Days without activities: {', '.join(missing_activity_days)}"],
+                revision_requests=["Add concrete activity blocks before dispatching execution bureaus."],
+                approved_bureaus=[],
+                review_notes=["Did not use real-time LLM review."],
+            )
+
+        return ReviewVerdictModel(
+            verdict="APPROVED",
+            summary="Offline deterministic review approved the structurally complete draft.",
+            approved_bureaus=list(packet.required_bureaus),
+            review_notes=["Did not use real-time LLM review; approval is structural only."],
+        )
+
+    def _normalize_draft_packet(self, draft: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(draft)
+        destination = normalized.get("destination") or (normalized.get("itinerary_draft") or {}).get("destination") or ""
+        itinerary = dict(normalized.get("itinerary_draft") or {})
+        daily_plan = []
+        for day in itinerary.get("daily_plan", []):
+            day_data = dict(day)
+            day_data.setdefault("city", destination)
+            daily_plan.append(day_data)
+        itinerary["daily_plan"] = daily_plan
+        normalized["itinerary_draft"] = itinerary
+        return normalized

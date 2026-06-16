@@ -77,7 +77,9 @@ class AccommodationBureau:
         currency = state.get("profile", {}).get("currency", "USD")
         zones = ["Central Station Area", "Old Town Core", "Museum Quarter"]
         hotels = []
+        fallback_note = "Estimated fallback; did not use real-time data. Confirm availability and rates before booking."
+        research_note = state.get("research_notes") or "MCP or LLM unavailable."
         for index, zone in enumerate(zones, start=1):
             query = quote_plus(f"{destination} {zone} hotel")
-            hotels.append({"name": f"{destination} {zone} Hotel {index}", "nightly_rate": 120 + index * 20, "total_rate": (120 + index * 20) * 2, "currency": currency, "rating": 4.0 + (index * 0.2), "booking_link": f"https://www.booking.com/searchresults.html?ss={query}", "address": f"{zone}, {destination}", "notes": state.get("research_notes", "Fallback hotel option.")})
-        return {"result": AccommodationExecutionResult(destination=destination, hotel_options=hotels, booking_links=[item["booking_link"] for item in hotels], search_notes=[state.get("research_notes", "Fallback accommodation synthesis.")]).model_dump(mode="json")}
+            hotels.append({"name": f"{destination} {zone} Hotel {index}", "nightly_rate": 120 + index * 20, "total_rate": (120 + index * 20) * 2, "currency": currency, "rating": 4.0 + (index * 0.2), "booking_link": f"https://www.booking.com/searchresults.html?ss={query}", "address": f"{zone}, {destination}", "notes": f"{fallback_note} {research_note}"})
+        return {"result": AccommodationExecutionResult(destination=destination, hotel_options=hotels, booking_links=[item["booking_link"] for item in hotels], search_notes=[fallback_note, research_note]).model_dump(mode="json")}

@@ -45,6 +45,8 @@ class AppSettings(BaseModel):
     amap_api_key: str | None = Field(default_factory=lambda: os.getenv("AMAP_API_KEY"))
     amap_mcp_url: str | None = Field(default_factory=_default_amap_mcp_url)
     serpapi_api_key: str | None = Field(default_factory=lambda: os.getenv("SERPAPI_API_KEY"))
+    run_live_tests: bool = Field(default_factory=lambda: os.getenv("RUN_LIVE_TESTS") == "1")
+    session_store_dir: str = Field(default_factory=lambda: os.getenv("SESSION_STORE_DIR", str(PROJECT_ROOT / "artifacts" / "sessions")))
 
 
 @lru_cache(maxsize=1)
