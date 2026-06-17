@@ -141,3 +141,53 @@ async def test_offline_verdict_approves_only_requested_bureaus():
     verdict = result["verdict_payload"]
     assert verdict["verdict"] == "APPROVED"
     assert verdict["approved_bureaus"] == ["WEATHER", "BUDGET"]
+
+
+@pytest.mark.asyncio
+async def test_verdict_falls_back_when_live_review_raises_non_runtime_error(monkeypatch):
+    async def fail_live_review(**kwargs):
+        raise ValueError("schema mismatch")
+
+    monkeypatch.setattr("provinces.menxia_review.graph.run_structured_synthesis", fail_live_review)
+    agent = MenxiaReviewAgent()
+
+    result = await agent.verdict(
+        {
+            "request_id": "offline_exception_001",
+            "parsed_draft": {
+                "request_id": "offline_exception_001",
+                "destination": "Tokyo",
+                "itinerary_draft": {
+                    "destination": "Tokyo",
+                    "overview": "Structured plan",
+                    "trip_style": "balanced",
+                    "daily_plan": [
+                        {
+                            "day_index": 1,
+                            "date": "2026-05-01",
+                            "city": "Tokyo",
+                            "theme": "Arrival",
+                            "summary": "Arrival and orientation",
+                            "activities": [
+                                {
+                                    "start_time": "09:00",
+                                    "end_time": "11:00",
+                                    "title": "Orientation walk",
+                                    "location_name": "Central Tokyo",
+                                    "description": "Confirm transit and local geography.",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "required_bureaus": ["WEATHER"],
+                "bureau_tasks": [],
+                "governance": {"producer": "ZHONGSHU", "revision_round": 0},
+            },
+            "user_request": {"profile": {"total_budget": 3000, "currency": "USD"}},
+        }
+    )
+
+    verdict = result["verdict_payload"]
+    assert verdict["verdict"] == "APPROVED"
+    assert verdict["approved_bureaus"] == ["WEATHER"]

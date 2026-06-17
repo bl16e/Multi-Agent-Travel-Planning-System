@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationError
 
-from utils.path_safety import sanitize_request_id
+from utils.path_safety import validate_request_id
 
 
 class StoredSession(BaseModel):
@@ -57,7 +57,7 @@ class JsonSessionStore:
             raise CorruptSessionError(f"Stored session is corrupt: {path}") from exc
 
     def _path_for(self, request_id: str) -> Path:
-        return self.directory / f"{sanitize_request_id(request_id)}.json"
+        return self.directory / f"{validate_request_id(request_id)}.json"
 
 
 class CorruptSessionError(RuntimeError):

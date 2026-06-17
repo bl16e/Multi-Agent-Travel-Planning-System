@@ -66,7 +66,7 @@ async def test_resume_trip_uses_json_session_store(tmp_path):
     assert second.workflow.requests[0].profile.total_budget == 2500
 
 
-def test_download_artifact_uses_sanitized_request_id(tmp_path, monkeypatch):
+def test_download_artifact_rejects_unsafe_request_id_alias(tmp_path, monkeypatch):
     artifact = tmp_path / "bad_secret_travel_plan.md"
     artifact.write_text("# safe", encoding="utf-8")
     outside = tmp_path.parent / "secret_travel_plan.md"
@@ -76,8 +76,7 @@ def test_download_artifact_uses_sanitized_request_id(tmp_path, monkeypatch):
     client = TestClient(main.app)
     response = client.get("/download/bad:secret")
 
-    assert response.status_code == 200
-    assert response.text == "# safe"
+    assert response.status_code == 404
 
 
 def test_plan_stream_emits_progress_result_and_done(monkeypatch):
@@ -109,6 +108,21 @@ def test_planning_request_rejects_unsafe_request_id():
         make_request("bad/request")
 
 
+def test_planning_request_rejects_end_date_before_start_date():
+    with pytest.raises(ValidationError):
+        PlanningRequest(
+            request_id="bad_dates",
+            user_message="Plan impossible dates",
+            profile=TravelerProfile(
+                origin_city="Beijing",
+                destination_preferences=["Tokyo"],
+                start_date="2026-05-05",
+                end_date="2026-05-01",
+                total_budget=1000,
+            ),
+        )
+
+
 def test_plan_api_rejects_unsafe_request_id():
     client = TestClient(main.app)
     payload = make_request("safe_request").model_dump(mode="json")
@@ -117,6 +131,19 @@ def test_plan_api_rejects_unsafe_request_id():
     response = client.post("/plan", json=payload)
 
     assert response.status_code == 422
+
+
+def test_plan_api_returns_structured_500_for_internal_error(monkeypatch):
+    async def raise_internal_error(request):
+        raise RuntimeError("workflow exploded")
+
+    monkeypatch.setattr(main.system, "plan_trip", raise_internal_error)
+    client = TestClient(main.app, raise_server_exceptions=False)
+
+    response = client.post("/plan", json=make_request("internal_error").model_dump(mode="json"))
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Planning workflow failed"
 
 
 def test_dashboard_returns_conflict_for_corrupt_session(tmp_path, monkeypatch):

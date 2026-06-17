@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from utils.schemas import FinalTravelPackageModel, PlanningRequest
 from utils.markdown_formatter import format_package_to_markdown
-from utils.path_safety import sanitize_request_id
+from utils.path_safety import validate_request_id
 from utils.session_store import CorruptSessionError, JsonSessionStore, SessionStore, StoredSession
 from utils.settings import get_settings
 from workflow import ProvinceWorkflow
@@ -53,6 +53,7 @@ class ThreeProvinceTravelSystem:
         return {"status": result.get("status", "HUMAN_INTERVENE"), "request_id": effective_request.request_id, "question": result.get("question"), "dashboard_url": self.workflow.orchestrator.build_dashboard_link(context) if context else None, "progress_events": context.progress_events if context else []}
 
     async def resume_trip(self, request_id: str, payload: HumanResumePayload) -> FinalTravelPackageModel | dict[str, Any]:
+        request_id = validate_request_id(request_id)
         session = self.sessions.get(request_id) or self._load_session(request_id)
         if not session:
             raise KeyError(f"Unknown request_id: {request_id}")
@@ -60,6 +61,7 @@ class ThreeProvinceTravelSystem:
         return await self.plan_trip(request, human_resume=payload)
 
     def dashboard_snapshot(self, request_id: str) -> dict[str, Any]:
+        request_id = validate_request_id(request_id)
         session = self.sessions.get(request_id) or self._load_session(request_id)
         if not session:
             raise KeyError(request_id)
@@ -201,7 +203,10 @@ async def plan_stream(request: PlanningRequest):
 @app.post("/resume/{request_id}/stream")
 async def resume_stream(request_id: str, payload: HumanResumePayload):
     try:
+        request_id = validate_request_id(request_id)
         session = _shared_sessions.get(request_id) or system._load_session(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}") from exc
     except CorruptSessionError as exc:
         raise HTTPException(status_code=409, detail="Stored session is corrupt") from exc
     if not session:
@@ -255,7 +260,7 @@ async def resume_stream(request_id: str, payload: HumanResumePayload):
 @app.get("/download/{request_id:path}")
 async def download_artifact(request_id: str):
     try:
-        safe_id = sanitize_request_id(request_id)
+        safe_id = validate_request_id(request_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="Artifact not found") from exc
     md_path = DEFAULT_ARTIFACT_DIR / f"{safe_id}_travel_plan.md"
@@ -269,13 +274,18 @@ async def download_artifact(request_id: str):
 
 @app.post("/plan")
 async def plan_trip(request: PlanningRequest) -> Any:
-    return await system.plan_trip(request)
+    try:
+        return await system.plan_trip(request)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Planning workflow failed") from exc
 
 
 @app.post("/resume/{request_id}")
 async def resume_trip(request_id: str, payload: HumanResumePayload) -> Any:
     try:
         return await system.resume_trip(request_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}") from exc
     except CorruptSessionError as exc:
         raise HTTPException(status_code=409, detail="Stored session is corrupt") from exc
     except KeyError as exc:
@@ -286,6 +296,8 @@ async def resume_trip(request_id: str, payload: HumanResumePayload) -> Any:
 async def dashboard(request_id: str) -> dict[str, Any]:
     try:
         return system.dashboard_snapshot(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}") from exc
     except CorruptSessionError as exc:
         raise HTTPException(status_code=409, detail="Stored session is corrupt") from exc
     except KeyError as exc:

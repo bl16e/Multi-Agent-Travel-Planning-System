@@ -92,7 +92,7 @@ class MenxiaReviewAgent:
                     },
                     timeout_seconds=200.0,
                 )
-            except RuntimeError:
+            except Exception:
                 verdict = self._offline_verdict(packet)
             # Guard: AI should not return HUMAN_INTERVENE; downgrade to REJECTED
             if verdict.verdict == "HUMAN_INTERVENE":

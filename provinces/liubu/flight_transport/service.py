@@ -17,6 +17,7 @@ class FlightState(TypedDict, total=False):
     origin_city: str
     destination: str
     profile: dict[str, Any]
+    daily_plan: list[dict[str, Any]]
     research_notes: str
     result: dict[str, Any]
 
@@ -48,7 +49,12 @@ class FlightTransportBureau:
         user_request = execution_plan.get("user_request", {})
         draft = approved_draft.get("itinerary_draft", {})
         profile = user_request.get("profile", {})
-        return {"origin_city": profile.get("origin_city") or "Origin TBD", "destination": approved_draft.get("destination") or draft.get("destination") or "Destination TBD", "profile": profile}
+        return {
+            "origin_city": profile.get("origin_city") or "Origin TBD",
+            "destination": approved_draft.get("destination") or draft.get("destination") or "Destination TBD",
+            "profile": profile,
+            "daily_plan": draft.get("daily_plan", []),
+        }
 
     async def research_transport(self, state: FlightState) -> dict[str, Any]:
         notes = await run_react_mcp_task(
@@ -81,8 +87,15 @@ class FlightTransportBureau:
         route_query = quote_plus(f"{origin_city} to {destination} flights")
         fallback_note = "Estimated fallback; did not use real-time data. Confirm carrier, routing, fare, and timing before booking."
         research_note = state.get("research_notes") or "MCP or LLM unavailable."
+        departure_date = profile.get("start_date") or self._first_trip_date(state.get("daily_plan", []))
         options = [
-            {"airline": "Estimated direct-flight option", "price": 320.0, "currency": profile.get("currency", "USD"), "departure_airport": origin_city, "arrival_airport": destination, "departure_time": f"{profile.get('start_date') or 'TBD'} 08:30", "arrival_time": f"{profile.get('start_date') or 'TBD'} 12:15", "duration_minutes": 225, "booking_link": f"https://www.google.com/travel/flights?q={route_query}", "notes": f"{fallback_note} {research_note}"},
-            {"airline": "Estimated connection option", "price": 255.0, "currency": profile.get("currency", "USD"), "departure_airport": origin_city, "arrival_airport": destination, "departure_time": f"{profile.get('start_date') or 'TBD'} 10:20", "arrival_time": f"{profile.get('start_date') or 'TBD'} 15:50", "duration_minutes": 330, "booking_link": f"https://www.skyscanner.com/transport/flights/{route_query}", "notes": f"{fallback_note} {research_note}"},
+            {"airline": "Estimated direct-flight option", "price": 320.0, "currency": profile.get("currency", "USD"), "departure_airport": origin_city, "arrival_airport": destination, "departure_time": f"{departure_date} 08:30", "arrival_time": f"{departure_date} 12:15", "duration_minutes": 225, "booking_link": f"https://www.google.com/travel/flights?q={route_query}", "notes": f"{fallback_note} {research_note}"},
+            {"airline": "Estimated connection option", "price": 255.0, "currency": profile.get("currency", "USD"), "departure_airport": origin_city, "arrival_airport": destination, "departure_time": f"{departure_date} 10:20", "arrival_time": f"{departure_date} 15:50", "duration_minutes": 330, "booking_link": f"https://www.skyscanner.com/transport/flights/{route_query}", "notes": f"{fallback_note} {research_note}"},
         ]
         return {"result": FlightTransportExecutionResult(origin=origin_city, destination=destination, flight_options=options, transport_notes=[fallback_note, research_note], booking_links=[item["booking_link"] for item in options]).model_dump(mode="json")}
+
+    def _first_trip_date(self, daily_plan: list[dict[str, Any]]) -> str:
+        for day in daily_plan:
+            if day.get("date"):
+                return str(day["date"])
+        return "unknown-date"

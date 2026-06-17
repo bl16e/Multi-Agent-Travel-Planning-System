@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from math import ceil
 from typing import Any, TypedDict
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -77,10 +78,27 @@ class BudgetBureau:
         draft = state.get("draft", {})
         currency = profile.get("currency", "USD")
         total_budget = profile.get("total_budget")
+        adults = max(int(profile.get("adults") or 1), 1)
+        budget_level = str(profile.get("budget_level") or "mid_range")
+        daily_plan = draft.get("daily_plan", [])
+        day_count = max(len(daily_plan), 1)
+        nights = max(day_count - 1, 1)
+        room_count = max(ceil(adults / 2), 1)
+        rate_multiplier = {"budget": 0.7, "mid_range": 1.0, "luxury": 2.0}.get(budget_level, 1.0)
         activity_total = sum(float(activity.get("estimated_cost") or 0) for day in draft.get("daily_plan", []) for activity in day.get("activities", []))
+        fallback_activity_total = activity_total or day_count * adults * 40 * rate_multiplier
+        accommodation_total = nights * room_count * 140 * rate_multiplier
+        food_total = day_count * adults * 60 * rate_multiplier
+        transport_total = day_count * adults * 25 * rate_multiplier
+        flights_total = adults * 320 if profile.get("origin_city") else 0
+        subtotal = fallback_activity_total + accommodation_total + food_total + transport_total + flights_total
         line_items = [
-            {"category": "activities", "item": "Planned activity blocks", "estimated_cost": round(activity_total, 2), "currency": currency, "notes": "Fallback estimate from itinerary."},
-            {"category": "misc", "item": "Buffer and incidentals", "estimated_cost": round(max(activity_total * 0.2, 50), 2), "currency": currency, "notes": state.get("research_notes", "Fallback budget synthesis.")},
+            {"category": "activities", "item": "Planned activity blocks", "estimated_cost": round(fallback_activity_total, 2), "currency": currency, "notes": "Estimated fallback from itinerary activity costs or per-day assumptions."},
+            {"category": "accommodation", "item": f"{nights} night(s), {room_count} room(s)", "estimated_cost": round(accommodation_total, 2), "currency": currency, "notes": "Estimated fallback; did not use real-time hotel rates."},
+            {"category": "food", "item": f"Meals for {adults} traveler(s)", "estimated_cost": round(food_total, 2), "currency": currency, "notes": "Estimated fallback food allowance."},
+            {"category": "transport", "item": "Local transit and transfers", "estimated_cost": round(transport_total, 2), "currency": currency, "notes": "Estimated fallback local transport allowance."},
+            {"category": "flights", "item": "Origin-destination transport allowance", "estimated_cost": round(flights_total, 2), "currency": currency, "notes": "Estimated fallback airfare allowance; confirm live fares before booking."},
+            {"category": "misc", "item": "Buffer and incidentals", "estimated_cost": round(max(subtotal * 0.15, 50), 2), "currency": currency, "notes": state.get("research_notes", "Fallback budget synthesis.")},
         ]
         total = round(sum(item["estimated_cost"] for item in line_items), 2)
         warnings = ["Budget output fell back because MCP or structured synthesis failed.", "Estimated fallback; did not use real-time data."]

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -10,7 +10,7 @@ from langgraph.graph import END, StateGraph
 from utils.agent_runtime import run_react_mcp_task, soul_path_for
 from utils.icalendar_utils import build_ics_calendar
 from utils.path_safety import sanitize_request_id
-from utils.schemas import CalendarEventModel, CalendarExecutionResult
+from utils.schemas import CalendarEventListModel, CalendarEventModel, CalendarExecutionResult
 from utils.llm_factory import build_qwen_chat
 
 
@@ -68,13 +68,13 @@ class CalendarBureau:
         llm = build_qwen_chat()
         if llm:
             try:
-                structured = llm.with_structured_output(list[CalendarEventModel])
+                structured = llm.with_structured_output(CalendarEventListModel)
                 prompt = ChatPromptTemplate.from_messages([
                     ("system", Path(self.soul_path).read_text(encoding="utf-8")),
-                    ("user", "Daily plan: {daily_plan}\nResearch notes: {research_notes}\nReturn a structured list of calendar events."),
+                    ("user", "Daily plan: {daily_plan}\nResearch notes: {research_notes}\nReturn a structured object with an events list."),
                 ])
-                events = await (prompt | structured).ainvoke({"daily_plan": str(state.get("daily_plan", [])), "research_notes": state.get("research_notes", "")})
-                return {"events": [item.model_dump(mode="json") for item in events]}
+                event_list = await (prompt | structured).ainvoke({"daily_plan": str(state.get("daily_plan", [])), "research_notes": state.get("research_notes", "")})
+                return {"events": [item.model_dump(mode="json") for item in event_list.events]}
             except Exception:
                 pass
         events: list[dict[str, Any]] = []
@@ -91,6 +91,6 @@ class CalendarBureau:
         return {"result": CalendarExecutionResult(calendar_file=output_path, events_created=len(events), calendar_name=f"{state['destination']} Travel Plan").model_dump(mode="json")}
 
     def _combine_datetime(self, day: str | None, clock: str) -> datetime:
-        day_value = datetime.fromisoformat(f"{day}T00:00:00") if day else datetime.utcnow()
+        day_value = datetime.fromisoformat(f"{day}T00:00:00") if day else datetime.now(timezone.utc).replace(tzinfo=None)
         hour, minute = [int(part) for part in clock.split(":", 1)]
         return day_value.replace(hour=hour, minute=minute)

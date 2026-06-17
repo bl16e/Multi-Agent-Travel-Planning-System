@@ -68,17 +68,20 @@ async def run_structured_synthesis(
     llm = build_qwen_chat()
     if llm is None:
         return _offline_structured_output(output_model, variables)
-    structured = llm.with_structured_output(output_model)
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", load_soul_prompt(soul_path)),
-            ("user", user_prompt),
-        ]
-    )
     try:
+        structured = llm.with_structured_output(output_model)
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", load_soul_prompt(soul_path)),
+                ("user", user_prompt),
+            ]
+        )
         return await asyncio.wait_for((prompt | structured).ainvoke(variables), timeout=timeout_seconds)
-    except asyncio.TimeoutError as exc:
-        raise TimeoutError(f"Structured synthesis timed out after {timeout_seconds:.0f}s.") from exc
+    except Exception as exc:
+        try:
+            return _offline_structured_output(output_model, {**variables, "fallback_reason": str(exc)})
+        except RuntimeError as fallback_exc:
+            raise RuntimeError(f"Structured synthesis failed and no offline fallback exists: {exc}") from fallback_exc
 
 
 def soul_path_for(file_path: str | Path) -> Path:

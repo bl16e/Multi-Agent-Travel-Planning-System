@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Annotated, Callable, TypedDict
+from typing import Any, Annotated, Awaitable, Callable, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langgraph.types import Send
@@ -228,44 +228,143 @@ class ProvinceWorkflow:
         return [Send(task["node"], {"payload": task["payload"], "context": state["context"]}) for task in state.get("liubu_tasks", [])]
 
     async def _node_liubu_weather(self, state: SystemState) -> dict[str, Any]:
-        self._emit_progress("liubu_weather", "start", "weather bureau running")
-        result = await self.weather.run(state["payload"])
-        self.orchestrator.register_execution_result(state["context"], AgentRole.WEATHER, result)
-        update = {"execution_results": {"WEATHER": result}}
-        self._emit_progress("liubu_weather", "done", "weather bureau returned", update)
-        return update
+        return await self._run_liubu_node(
+            state,
+            node_name="liubu_weather",
+            role=AgentRole.WEATHER,
+            running_message="weather bureau running",
+            returned_message="weather bureau returned",
+            run_bureau=self.weather.run,
+            fallback_result=self._fallback_weather_result,
+        )
 
     async def _node_liubu_budget(self, state: SystemState) -> dict[str, Any]:
-        self._emit_progress("liubu_budget", "start", "budget bureau running")
-        result = await self.budget.run(state["payload"])
-        self.orchestrator.register_execution_result(state["context"], AgentRole.BUDGET, result)
-        update = {"execution_results": {"BUDGET": result}}
-        self._emit_progress("liubu_budget", "done", "budget bureau returned", update)
-        return update
+        return await self._run_liubu_node(
+            state,
+            node_name="liubu_budget",
+            role=AgentRole.BUDGET,
+            running_message="budget bureau running",
+            returned_message="budget bureau returned",
+            run_bureau=self.budget.run,
+            fallback_result=self._fallback_budget_result,
+        )
 
     async def _node_liubu_accommodation(self, state: SystemState) -> dict[str, Any]:
-        self._emit_progress("liubu_accommodation", "start", "accommodation bureau running")
-        result = await self.accommodation.run(state["payload"])
-        self.orchestrator.register_execution_result(state["context"], AgentRole.ACCOMMODATION, result)
-        update = {"execution_results": {"ACCOMMODATION": result}}
-        self._emit_progress("liubu_accommodation", "done", "accommodation bureau returned", update)
-        return update
+        return await self._run_liubu_node(
+            state,
+            node_name="liubu_accommodation",
+            role=AgentRole.ACCOMMODATION,
+            running_message="accommodation bureau running",
+            returned_message="accommodation bureau returned",
+            run_bureau=self.accommodation.run,
+            fallback_result=self._fallback_accommodation_result,
+        )
 
     async def _node_liubu_flight_transport(self, state: SystemState) -> dict[str, Any]:
-        self._emit_progress("liubu_flight_transport", "start", "flight transport bureau running")
-        result = await self.flight_transport.run(state["payload"])
-        self.orchestrator.register_execution_result(state["context"], AgentRole.FLIGHT_TRANSPORT, result)
-        update = {"execution_results": {"FLIGHT_TRANSPORT": result}}
-        self._emit_progress("liubu_flight_transport", "done", "flight transport bureau returned", update)
-        return update
+        return await self._run_liubu_node(
+            state,
+            node_name="liubu_flight_transport",
+            role=AgentRole.FLIGHT_TRANSPORT,
+            running_message="flight transport bureau running",
+            returned_message="flight transport bureau returned",
+            run_bureau=self.flight_transport.run,
+            fallback_result=self._fallback_flight_transport_result,
+        )
 
     async def _node_liubu_calendar(self, state: SystemState) -> dict[str, Any]:
-        self._emit_progress("liubu_calendar", "start", "calendar bureau running")
-        result = await self.calendar.run(state["payload"])
-        self.orchestrator.register_execution_result(state["context"], AgentRole.CALENDAR, result)
-        update = {"execution_results": {"CALENDAR": result}}
-        self._emit_progress("liubu_calendar", "done", "calendar bureau returned", update)
+        return await self._run_liubu_node(
+            state,
+            node_name="liubu_calendar",
+            role=AgentRole.CALENDAR,
+            running_message="calendar bureau running",
+            returned_message="calendar bureau returned",
+            run_bureau=self.calendar.run,
+            fallback_result=self._fallback_calendar_result,
+        )
+
+    async def _run_liubu_node(
+        self,
+        state: SystemState,
+        *,
+        node_name: str,
+        role: AgentRole,
+        running_message: str,
+        returned_message: str,
+        run_bureau: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+        fallback_result: Callable[[dict[str, Any], Exception], dict[str, Any]],
+    ) -> dict[str, Any]:
+        self._emit_progress(node_name, "start", running_message)
+        try:
+            result = await run_bureau(state["payload"])
+            phase = "done"
+            message = returned_message
+        except Exception as exc:
+            result = fallback_result(state["payload"], exc)
+            phase = "error"
+            message = f"{role.value} bureau failed; using fallback result: {exc}"
+        self.orchestrator.register_execution_result(state["context"], role, result)
+        update = {"execution_results": {role.value: result}}
+        self._emit_progress(node_name, phase, message, update)
         return update
+
+    def _fallback_weather_result(self, payload: dict[str, Any], exc: Exception) -> dict[str, Any]:
+        return {
+            "bureau": "WEATHER",
+            "destination": self._payload_destination(payload),
+            "forecast_days": [],
+            "packing_list": [],
+            "warnings": [f"Weather bureau failed: {exc}"],
+            "summary": "Weather bureau failed; no live weather guidance was generated.",
+        }
+
+    def _fallback_budget_result(self, payload: dict[str, Any], exc: Exception) -> dict[str, Any]:
+        return {
+            "bureau": "BUDGET",
+            "currency": self._payload_profile(payload).get("currency", "USD"),
+            "budget_breakdown": [],
+            "total_estimated_cost": 0,
+            "warnings": [f"Budget bureau failed: {exc}"],
+        }
+
+    def _fallback_accommodation_result(self, payload: dict[str, Any], exc: Exception) -> dict[str, Any]:
+        return {
+            "bureau": "ACCOMMODATION",
+            "destination": self._payload_destination(payload),
+            "hotel_options": [],
+            "booking_links": [],
+            "search_notes": [f"Accommodation bureau failed: {exc}"],
+        }
+
+    def _fallback_flight_transport_result(self, payload: dict[str, Any], exc: Exception) -> dict[str, Any]:
+        profile = self._payload_profile(payload)
+        return {
+            "bureau": "FLIGHT_TRANSPORT",
+            "origin": profile.get("origin_city") or "Unknown origin",
+            "destination": self._payload_destination(payload),
+            "flight_options": [],
+            "transport_notes": [f"Flight transport bureau failed: {exc}"],
+            "booking_links": [],
+        }
+
+    def _fallback_calendar_result(self, payload: dict[str, Any], exc: Exception) -> dict[str, Any]:
+        request_id = sanitize_request_id(str(payload.get("request_id") or "trip"))
+        return {
+            "bureau": "CALENDAR",
+            "calendar_file": self.artifact_dir / f"{request_id}_trip_calendar.ics",
+            "events_created": 0,
+            "calendar_name": f"{self._payload_destination(payload)} Travel Plan",
+            "warnings": [f"Calendar bureau failed: {exc}"],
+        }
+
+    def _payload_destination(self, payload: dict[str, Any]) -> str:
+        approved_draft = payload.get("approved_draft", {})
+        draft = approved_draft.get("itinerary_draft", {})
+        return approved_draft.get("destination") or draft.get("destination") or "Unknown Destination"
+
+    def _payload_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        execution_plan = payload.get("execution_plan", {})
+        user_request = execution_plan.get("user_request", {})
+        return user_request.get("profile", {})
 
     async def _node_assemble(self, state: SystemState) -> dict[str, Any]:
         self._emit_progress("shangshu_assemble", "start", "assemble final package")

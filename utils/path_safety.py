@@ -3,7 +3,15 @@ from __future__ import annotations
 import re
 
 _SAFE_REQUEST_ID_RE = re.compile(r"[^A-Za-z0-9_.-]")
+_VALID_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 _MAX_REQUEST_ID_LENGTH = 100
+
+
+def validate_request_id(request_id: str) -> str:
+    value = str(request_id or "").strip()
+    if not _VALID_REQUEST_ID_RE.fullmatch(value):
+        raise ValueError("request_id must match [A-Za-z0-9_.-]{1,100}")
+    return value
 
 
 def sanitize_request_id(request_id: str) -> str:

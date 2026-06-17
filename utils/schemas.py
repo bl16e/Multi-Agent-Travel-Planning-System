@@ -5,7 +5,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 from utils.permission_matrix import AgentRole
 from utils.state_machine import WorkflowState
@@ -47,6 +47,12 @@ class TravelerProfile(BaseModel):
     interests: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     pace: str = "balanced"
+
+    @model_validator(mode="after")
+    def validate_date_order(self) -> "TravelerProfile":
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must be on or after start_date")
+        return self
 
 
 class PlanningRequest(BaseModel):
@@ -215,6 +221,10 @@ class CalendarEventModel(BaseModel):
     description: str
     url: HttpUrl | str | None = None
     reminders_minutes: list[int] = Field(default_factory=lambda: [60, 1440])
+
+
+class CalendarEventListModel(BaseModel):
+    events: list[CalendarEventModel] = Field(default_factory=list)
 
 
 class CalendarExecutionResult(BaseModel):

@@ -6,8 +6,8 @@ from utils.session_store import CorruptSessionError, JsonSessionStore, StoredSes
 def test_json_session_store_round_trips_session(tmp_path):
     store = JsonSessionStore(tmp_path)
     session = StoredSession(
-        request_id="trip/../tokyo",
-        request={"request_id": "trip/../tokyo", "user_message": "Plan Tokyo", "profile": {}},
+        request_id="trip_tokyo",
+        request={"request_id": "trip_tokyo", "user_message": "Plan Tokyo", "profile": {}},
         status="HUMAN_INTERVENE",
         context_snapshot={"pending_user_inputs": ["Need budget"]},
         result={"status": "HUMAN_INTERVENE"},
@@ -15,9 +15,9 @@ def test_json_session_store_round_trips_session(tmp_path):
 
     store.save(session)
 
-    loaded = store.load("trip/../tokyo")
+    loaded = store.load("trip_tokyo")
     assert loaded == session
-    assert (tmp_path / "trip_.._tokyo.json").exists()
+    assert (tmp_path / "trip_tokyo.json").exists()
 
 
 def test_json_session_store_returns_none_for_missing_session(tmp_path):
@@ -30,3 +30,16 @@ def test_json_session_store_raises_clear_error_for_corrupt_session(tmp_path):
 
     with pytest.raises(CorruptSessionError):
         store.load("broken")
+
+
+def test_json_session_store_rejects_unsafe_request_id_alias_on_load(tmp_path):
+    store = JsonSessionStore(tmp_path)
+    store.save(
+        StoredSession(
+            request_id="bad_secret",
+            request={"request_id": "bad_secret", "user_message": "Plan Tokyo", "profile": {}},
+        )
+    )
+
+    with pytest.raises(ValueError):
+        store.load("bad:secret")

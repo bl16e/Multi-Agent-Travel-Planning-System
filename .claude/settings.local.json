@@ -14,7 +14,10 @@
       "Bash(cd \"E:/Document/MASystem/project\" && npx tsc --noEmit 2>&1)",
       "Bash(find ./src -type f -name \"*.py\" 2>/dev/null | head -30)",
       "Bash(find ./provinces -type f -name \"*.py\" 2>/dev/null | head -30)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(pip show *)",
+      "Bash(python -c \"from langchain_mcp_adapters.client import MultiServerMCPClient; import inspect; src = inspect.getsource\\(MultiServerMCPClient.get_tools\\); print\\(src\\)\")",
+      "Bash(python -c \"from langchain_mcp_adapters.client import MultiServerMCPClient; import inspect; src = inspect.getsource\\(MultiServerMCPClient.__init__\\); print\\(src\\); print\\('---'\\); src2 = inspect.getsource\\(MultiServerMCPClient.__aenter__\\); print\\(src2\\)\")"
     ]
   }
 }
