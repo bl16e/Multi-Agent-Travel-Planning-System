@@ -32,6 +32,33 @@ Live tests are skipped unless explicitly enabled:
 RUN_LIVE_TESTS=1 python -m pytest -q -m live
 ```
 
+## Development Verification
+
+Implementation work must follow the project constitution. Do not add production
+branches, lookup tables, canned responses, or magic IDs solely to satisfy tests.
+Deterministic fallbacks are acceptable only when they are documented product
+behavior, depend on the request input, and are visible outside the test suite.
+
+When changing framework, provider, or protocol behavior, use official
+documentation, official examples, or upstream source as the implementation
+reference. This applies to FastAPI, LangGraph, LangChain, Pydantic, Qwen or
+OpenAI-compatible clients, MCP integrations, iCalendar output, and pytest
+features.
+
+After a new feature or behavior change, run a real end-to-end workflow/API
+verification and inspect the observed result. The default offline check is:
+
+```bash
+python -m pytest tests/test_integration.py tests/test_main_api.py -q
+```
+
+If the change affects live LLM/MCP/provider behavior, also run the live suite
+with credentials:
+
+```bash
+RUN_LIVE_TESTS=1 python -m pytest -q -m live
+```
+
 ## Artifacts And Sessions
 
 Generated Markdown and iCalendar files are written under `OUTPUT_DIR` or the configured artifact directory. New planning requests require request IDs to match `[A-Za-z0-9_.-]{1,100}`. Resume, dashboard, download, and session lookups reject unsafe IDs instead of mapping them to sanitized aliases.
