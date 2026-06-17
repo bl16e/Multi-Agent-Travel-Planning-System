@@ -1,0 +1,297 @@
+openapi: 3.1.0
+info:
+  title: Three Provinces Six Bureaus Travel Planner - Report Closure Contract
+  version: 1.0.0
+  description: >
+    Contract for workflow/session/resume/fallback behavior touched by the
+    resolve-report-issues feature. Existing endpoint URLs are preserved.
+paths:
+  /plan:
+    post:
+      summary: Start a non-streaming planning request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanningRequest'
+      responses:
+        '200':
+          description: Final package, human intervention, or rejection
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/FinalTravelPackage'
+                  - $ref: '#/components/schemas/HumanInterventionResponse'
+                  - $ref: '#/components/schemas/RejectionResponse'
+        '422':
+          description: Request validation failed
+        '500':
+          description: Structured planning workflow failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /plan/stream:
+    post:
+      summary: Start a streaming planning request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanningRequest'
+      responses:
+        '200':
+          description: Server-sent event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Emits progress, result, error, and done events.
+  /resume/{request_id}:
+    post:
+      summary: Resume a human-intervention planning session
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HumanResumePayload'
+      responses:
+        '200':
+          description: Boundary continuation result or explicit replay result
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/FinalTravelPackage'
+                  - $ref: '#/components/schemas/HumanInterventionResponse'
+                  - $ref: '#/components/schemas/RejectionResponse'
+        '404':
+          description: Unknown or unsafe request_id
+        '409':
+          description: Stored session is corrupt
+  /resume/{request_id}/stream:
+    post:
+      summary: Resume a human-intervention planning session with SSE progress
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HumanResumePayload'
+      responses:
+        '200':
+          description: Server-sent event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Emits progress, result, error, and done events.
+        '404':
+          description: Unknown or unsafe request_id
+        '409':
+          description: Stored session is corrupt
+  /dashboard/{request_id}:
+    get:
+      summary: Inspect session status
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Session dashboard snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardSnapshot'
+        '404':
+          description: Unknown or unsafe request_id
+        '409':
+          description: Stored session is corrupt
+  /download/{request_id}:
+    get:
+      summary: Download generated Markdown or iCalendar artifact
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Generated artifact
+          content:
+            text/markdown:
+              schema:
+                type: string
+            text/calendar:
+              schema:
+                type: string
+        '404':
+          description: Artifact not found or unsafe request_id
+components:
+  parameters:
+    RequestId:
+      name: request_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_.-]{1,100}$'
+  schemas:
+    PlanningRequest:
+      type: object
+      required: [request_id, user_message, profile]
+      properties:
+        request_id:
+          type: string
+          pattern: '^[A-Za-z0-9_.-]{1,100}$'
+        user_message:
+          type: string
+        profile:
+          type: object
+          required: [origin_city, destination_preferences, start_date, end_date]
+          properties:
+            origin_city:
+              type: string
+            destination_preferences:
+              type: array
+              items:
+                type: string
+              minItems: 1
+            start_date:
+              type: string
+              format: date
+            end_date:
+              type: string
+              format: date
+              description: Must be on or after start_date.
+            total_budget:
+              type: number
+              nullable: true
+            currency:
+              type: string
+    HumanResumePayload:
+      type: object
+      properties:
+        profile_updates:
+          type: object
+          additionalProperties: true
+        user_message:
+          type: string
+          nullable: true
+    HumanInterventionResponse:
+      type: object
+      required: [status, request_id, question]
+      properties:
+        status:
+          const: HUMAN_INTERVENE
+        request_id:
+          type: string
+        question:
+          type: string
+        dashboard_url:
+          type: string
+          nullable: true
+        progress_events:
+          type: array
+          items:
+            type: object
+        resume_mode:
+          enum: [boundary, replay, none]
+        resume_state:
+          type: object
+          additionalProperties: true
+    RejectionResponse:
+      type: object
+      required: [status, request_id]
+      properties:
+        status:
+          const: REJECTED
+        request_id:
+          type: string
+        review:
+          type: object
+        retry_allowed:
+          type: boolean
+        reason:
+          type: string
+    BureauResult:
+      type: object
+      required: [bureau, data_source]
+      properties:
+        bureau:
+          enum: [WEATHER, BUDGET, ACCOMMODATION, FLIGHT_TRANSPORT, CALENDAR]
+        status:
+          enum: [ok, fallback, error]
+        data_source:
+          enum: [live, structured_llm, fallback_estimate, unavailable]
+        warnings:
+          type: array
+          items:
+            type: string
+    FinalTravelPackage:
+      type: object
+      required: [request_id, destination, workflow_state, itinerary, review]
+      properties:
+        request_id:
+          type: string
+        destination:
+          type: string
+        workflow_state:
+          const: DONE
+        itinerary:
+          type: object
+        review:
+          type: object
+        weather:
+          $ref: '#/components/schemas/BureauResult'
+        budget:
+          $ref: '#/components/schemas/BureauResult'
+        accommodation:
+          $ref: '#/components/schemas/BureauResult'
+        flight_transport:
+          $ref: '#/components/schemas/BureauResult'
+        markdown_file:
+          type: string
+          nullable: true
+        calendar_file:
+          type: string
+          nullable: true
+        dashboard_url:
+          type: string
+          nullable: true
+    DashboardSnapshot:
+      type: object
+      required: [request_id, status]
+      properties:
+        request_id:
+          type: string
+        status:
+          type: string
+        current_state:
+          type: string
+          nullable: true
+        pending_user_inputs:
+          type: array
+          items:
+            type: string
+        progress_events:
+          type: array
+          items:
+            type: object
+        has_package:
+          type: boolean
+        resume_mode:
+          enum: [boundary, replay, none]
+    ErrorResponse:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties: true
