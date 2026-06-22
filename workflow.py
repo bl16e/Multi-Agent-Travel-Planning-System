@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -260,7 +261,13 @@ class ProvinceWorkflow:
         tasks = state.get("liubu_tasks") or []
         if not tasks:
             raise ValueError("No Liubu bureau tasks to dispatch")
-        return [Send(task["node"], {"payload": task["payload"], "context": state["context"]}) for task in tasks]
+        return [
+            Send(task["node"], {"payload": task["payload"], "context": self._clone_liubu_context(state["context"])})
+            for task in tasks
+        ]
+
+    def _clone_liubu_context(self, context: ShangshuWorkflowContext) -> ShangshuWorkflowContext:
+        return copy.deepcopy(context)
 
     async def _node_liubu_weather(self, state: SystemState) -> dict[str, Any]:
         return await self._run_liubu_node(

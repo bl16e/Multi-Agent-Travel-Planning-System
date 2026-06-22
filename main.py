@@ -268,6 +268,12 @@ def _cache_planner_sessions(planner: Any) -> None:
         _shared_sessions.set(request_id, session)
 
 
+def _cleanup_shared_sessions() -> None:
+    cleanup = getattr(_shared_sessions, "cleanup_expired", None)
+    if callable(cleanup):
+        cleanup()
+
+
 async def _execute_plan_request(
     request: PlanningRequest,
     *,
@@ -302,6 +308,7 @@ async def _execute_resume_request(
 
 def _load_resume_session(request_id: str) -> dict[str, Any] | None:
     safe_request_id = validate_request_id(request_id)
+    _cleanup_shared_sessions()
     return _shared_sessions.get(safe_request_id) or system._load_session(safe_request_id)
 
 
@@ -452,6 +459,7 @@ async def resume_trip(request_id: str, payload: HumanResumePayload) -> Any:
 @app.get("/dashboard/{request_id}")
 async def dashboard(request_id: str) -> dict[str, Any]:
     try:
+        _cleanup_shared_sessions()
         return system.dashboard_snapshot(request_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}") from exc

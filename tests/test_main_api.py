@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ from pydantic import ValidationError
 import main
 from main import HumanResumePayload, ThreeProvinceTravelSystem
 from utils.schemas import PlanningRequest, TravelerProfile
+from utils.session_cache import InMemorySessionCache
 from utils.session_store import JsonSessionStore
 
 
@@ -185,6 +187,138 @@ def test_plan_api_uses_fresh_planner_instance_per_request(monkeypatch):
     assert first.json()["question"] == "instance-0"
     assert second.json()["question"] == "instance-1"
     assert len(created) == 2
+
+
+def test_concurrent_plan_requests_keep_sessions_isolated(monkeypatch):
+    cache = InMemorySessionCache(max_entries=10, ttl_seconds=3600)
+
+    class ConcurrentFakeSystem:
+        def __init__(self, artifact_dir=None, progress_reporter=None):
+            self.sessions = {}
+
+        async def plan_trip(self, request):
+            result = {
+                "status": "HUMAN_INTERVENE",
+                "request_id": request.request_id,
+                "question": f"Need budget for {request.profile.destination_preferences[0]}",
+            }
+            self.sessions[request.request_id] = {
+                "request": request,
+                "status": result["status"],
+                "result": result,
+                "context_snapshot": {
+                    "progress_events": [{"request_id": request.request_id}],
+                    "pending_user_inputs": [result["question"]],
+                },
+            }
+            return result
+
+    monkeypatch.setattr(main, "_shared_sessions", cache)
+    monkeypatch.setattr(main, "ThreeProvinceTravelSystem", ConcurrentFakeSystem)
+
+    tokyo = make_request("concurrent_tokyo").model_dump(mode="json")
+    seoul = make_request("concurrent_seoul").model_dump(mode="json")
+    seoul["profile"]["destination_preferences"] = ["Seoul"]
+
+    def post_plan(payload):
+        with TestClient(main.app, raise_server_exceptions=False) as client:
+            return client.post("/plan", json=payload)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(post_plan, [tokyo, seoul]))
+
+    assert {response.status_code for response in responses} == {200}
+    bodies = {response.json()["request_id"]: response.json() for response in responses}
+    assert bodies["concurrent_tokyo"]["question"] == "Need budget for Tokyo"
+    assert bodies["concurrent_seoul"]["question"] == "Need budget for Seoul"
+    assert cache.get("concurrent_tokyo")["request"].profile.destination_preferences == ["Tokyo"]
+    assert cache.get("concurrent_seoul")["request"].profile.destination_preferences == ["Seoul"]
+
+
+def test_streaming_plan_sessions_are_recorded_by_request_id(monkeypatch):
+    cache = InMemorySessionCache(max_entries=10, ttl_seconds=3600)
+
+    class StreamingSessionFakeSystem:
+        def __init__(self, artifact_dir=None, progress_reporter=None):
+            self.progress_reporter = progress_reporter
+            self.sessions = {}
+
+        async def plan_trip(self, request):
+            if self.progress_reporter:
+                self.progress_reporter(f"{request.request_id}: streaming progress")
+            result = {
+                "status": "HUMAN_INTERVENE",
+                "request_id": request.request_id,
+                "question": f"Need budget for {request.request_id}",
+            }
+            self.sessions[request.request_id] = {
+                "request": request,
+                "status": result["status"],
+                "result": result,
+                "context_snapshot": {
+                    "progress_events": [{"request_id": request.request_id}],
+                },
+            }
+            return result
+
+    monkeypatch.setattr(main, "_shared_sessions", cache)
+    monkeypatch.setattr(main, "ThreeProvinceTravelSystem", StreamingSessionFakeSystem)
+    client = TestClient(main.app, raise_server_exceptions=False)
+
+    first = client.post("/plan/stream", json=make_request("stream_iso_a").model_dump(mode="json"))
+    second = client.post("/plan/stream", json=make_request("stream_iso_b").model_dump(mode="json"))
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_events = parse_sse_events(first.text)
+    second_events = parse_sse_events(second.text)
+    assert next(data for name, data in first_events if name == "result")["request_id"] == "stream_iso_a"
+    assert next(data for name, data in second_events if name == "result")["request_id"] == "stream_iso_b"
+    assert all(
+        "stream_iso_b" not in data["line"]
+        for name, data in first_events
+        if name == "progress"
+    )
+    assert all(
+        "stream_iso_a" not in data["line"]
+        for name, data in second_events
+        if name == "progress"
+    )
+    assert cache.get("stream_iso_a")["result"]["request_id"] == "stream_iso_a"
+    assert cache.get("stream_iso_b")["result"]["request_id"] == "stream_iso_b"
+
+
+def test_api_created_sessions_obey_shared_cache_eviction(monkeypatch):
+    cache = InMemorySessionCache(max_entries=1, ttl_seconds=3600)
+
+    class CachedFakeSystem:
+        def __init__(self, artifact_dir=None, progress_reporter=None):
+            self.sessions = {}
+
+        async def plan_trip(self, request):
+            result = {
+                "status": "HUMAN_INTERVENE",
+                "request_id": request.request_id,
+                "question": "Need budget",
+            }
+            self.sessions[request.request_id] = {
+                "request": request,
+                "status": result["status"],
+                "result": result,
+            }
+            return result
+
+    monkeypatch.setattr(main, "_shared_sessions", cache)
+    monkeypatch.setattr(main, "ThreeProvinceTravelSystem", CachedFakeSystem)
+    client = TestClient(main.app, raise_server_exceptions=False)
+
+    first = client.post("/plan", json=make_request("cache_evict_first").model_dump(mode="json"))
+    second = client.post("/plan", json=make_request("cache_evict_second").model_dump(mode="json"))
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert cache.get("cache_evict_first") is None
+    assert cache.get("cache_evict_second")["result"]["request_id"] == "cache_evict_second"
 
 
 def test_planning_request_rejects_unsafe_request_id():
@@ -397,6 +531,56 @@ def test_resume_api_response_includes_contract_resume_fields(monkeypatch):
     assert data["status"] == "HUMAN_INTERVENE"
     assert data["resume_mode"] == "boundary"
     assert data["resume_state"]["mode"] == "boundary"
+
+
+def test_resume_read_cleans_shared_cache_before_session_lookup(monkeypatch):
+    class CleanupSpyCache:
+        def __init__(self):
+            self.cleanup_calls = 0
+
+        def cleanup_expired(self):
+            self.cleanup_calls += 1
+
+        def get(self, request_id):
+            return None
+
+    class MissingSessionSystem:
+        def _load_session(self, request_id):
+            return None
+
+    cache = CleanupSpyCache()
+    monkeypatch.setattr(main, "_shared_sessions", cache)
+    monkeypatch.setattr(main, "system", MissingSessionSystem())
+    client = TestClient(main.app, raise_server_exceptions=False)
+
+    response = client.post("/resume/cache_cleanup_resume", json={"profile_updates": {"total_budget": 2500}})
+
+    assert response.status_code == 404
+    assert cache.cleanup_calls == 1
+
+
+def test_dashboard_cleans_shared_cache_before_session_lookup(monkeypatch):
+    class CleanupSpyCache:
+        def __init__(self):
+            self.cleanup_calls = 0
+
+        def cleanup_expired(self):
+            self.cleanup_calls += 1
+
+    class DashboardSystem:
+        def dashboard_snapshot(self, request_id):
+            return {"request_id": request_id, "status": "HUMAN_INTERVENE"}
+
+    cache = CleanupSpyCache()
+    monkeypatch.setattr(main, "_shared_sessions", cache)
+    monkeypatch.setattr(main, "system", DashboardSystem())
+    client = TestClient(main.app, raise_server_exceptions=False)
+
+    response = client.get("/dashboard/cache_cleanup_dashboard")
+
+    assert response.status_code == 200
+    assert response.json()["request_id"] == "cache_cleanup_dashboard"
+    assert cache.cleanup_calls == 1
 
 
 def test_resume_stream_emits_labeled_resume_events(monkeypatch):
