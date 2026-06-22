@@ -25,3 +25,18 @@ async def test_full_workflow_integration():
     assert result["status"] in ["DONE", "HUMAN_INTERVENE", "REJECTED"]
     if result["status"] == "DONE":
         assert "final_package" in result
+        package = result["final_package"]
+        assert package["request_id"] == request.request_id
+        assert package["destination"] == "Tokyo"
+        assert package["workflow_state"] == "DONE"
+        assert package["itinerary"]["destination"] == "Tokyo"
+        assert package["review"]["request_id"] == request.request_id
+        assert isinstance(package["booking_links"], list)
+        assert isinstance(package["progress_events"], list)
+    elif result["status"] == "HUMAN_INTERVENE":
+        assert result["question"]
+        assert result["context"].request_id == request.request_id
+    else:
+        payload = result["rejected_payload"]
+        assert payload["status"] == "REJECTED"
+        assert payload["request_id"] == request.request_id

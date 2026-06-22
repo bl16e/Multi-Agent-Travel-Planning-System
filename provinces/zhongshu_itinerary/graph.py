@@ -48,7 +48,9 @@ class ZhongshuItineraryAgent:
         previous_draft = state.get("draft") or {}
         profile = user_request.get("profile", {})
         destination_preferences = profile.get("destination_preferences") or []
-        destination = destination_preferences[0] if destination_preferences else "Tokyo"
+        destination = next((str(item).strip() for item in destination_preferences if str(item).strip()), "")
+        if not destination:
+            raise ValueError("destination preference is required")
         rejection_reasons = [
             *[str(item) for item in review_feedback.get("blocking_issues", []) if item],
             *[str(item) for item in review_feedback.get("review_notes", []) if item],

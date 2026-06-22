@@ -225,7 +225,10 @@ class ProvinceWorkflow:
         return result
 
     def _route_to_liubu(self, state: SystemState) -> list[Send]:
-        return [Send(task["node"], {"payload": task["payload"], "context": state["context"]}) for task in state.get("liubu_tasks", [])]
+        tasks = state.get("liubu_tasks") or []
+        if not tasks:
+            raise ValueError("No Liubu bureau tasks to dispatch")
+        return [Send(task["node"], {"payload": task["payload"], "context": state["context"]}) for task in tasks]
 
     async def _node_liubu_weather(self, state: SystemState) -> dict[str, Any]:
         return await self._run_liubu_node(

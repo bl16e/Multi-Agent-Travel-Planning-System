@@ -13,6 +13,14 @@ from utils.state_machine import TravelWorkflowStateMachine, WorkflowState
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_LIUBU_TARGETS = [
+    AgentRole.WEATHER,
+    AgentRole.CALENDAR,
+    AgentRole.BUDGET,
+    AgentRole.ACCOMMODATION,
+    AgentRole.FLIGHT_TRANSPORT,
+]
+
 
 @dataclass(slots=True, frozen=True)
 class DispatchBundle:
@@ -192,10 +200,25 @@ class ShangshuOrchestrator:
         return DispatchBundle(sends=(Send(self._graph_node_name_for(task.target), task.payload),), tasks=(task,), emitted_at=datetime.now(timezone.utc))
 
     def _resolve_liubu_targets(self, execution_plan: dict[str, Any]) -> list[AgentRole]:
-        requested = execution_plan.get("required_bureaus", [])
+        if "required_bureaus" not in execution_plan or execution_plan.get("required_bureaus") is None:
+            return list(DEFAULT_LIUBU_TARGETS)
+        requested = execution_plan.get("required_bureaus") or []
         if not requested:
-            return [AgentRole.WEATHER, AgentRole.CALENDAR, AgentRole.BUDGET, AgentRole.ACCOMMODATION, AgentRole.FLIGHT_TRANSPORT]
-        return [AgentRole(item) for item in requested]
+            raise ValueError("required_bureaus cannot be empty")
+
+        targets: list[AgentRole] = []
+        seen: set[AgentRole] = set()
+        for item in requested:
+            try:
+                role = item if isinstance(item, AgentRole) else AgentRole(str(item))
+            except ValueError as exc:
+                raise ValueError(f"Unsupported Liubu target: {item}") from exc
+            if role not in DEFAULT_LIUBU_TARGETS:
+                raise ValueError(f"Unsupported Liubu target: {role.value}")
+            if role not in seen:
+                targets.append(role)
+                seen.add(role)
+        return targets
 
     def _graph_node_name_for(self, target: AgentRole) -> str:
         return {

@@ -1,4 +1,6 @@
 import pytest
+from langgraph.types import Send
+
 from workflow import ProvinceWorkflow
 from utils.schemas import PlanningRequest, TravelerProfile
 
@@ -61,3 +63,28 @@ async def test_liubu_node_returns_fallback_result_when_bureau_raises():
     assert weather["destination"] == "Tokyo"
     assert weather["forecast_days"] == []
     assert any("failed" in warning.lower() for warning in weather["warnings"])
+
+
+def test_route_to_liubu_rejects_empty_task_list():
+    workflow = ProvinceWorkflow()
+
+    with pytest.raises(ValueError, match="No Liubu bureau tasks"):
+        workflow._route_to_liubu({"liubu_tasks": []})
+
+
+def test_route_to_liubu_keeps_each_task_payload_isolated():
+    workflow = ProvinceWorkflow()
+    state = {
+        "context": object(),
+        "liubu_tasks": [
+            {"node": "liubu_weather", "payload": {"target_bureau": "WEATHER"}},
+            {"node": "liubu_budget", "payload": {"target_bureau": "BUDGET"}},
+        ],
+    }
+
+    sends = workflow._route_to_liubu(state)
+
+    assert all(isinstance(send, Send) for send in sends)
+    assert [send.node for send in sends] == ["liubu_weather", "liubu_budget"]
+    assert sends[0].arg["payload"] == {"target_bureau": "WEATHER"}
+    assert sends[1].arg["payload"] == {"target_bureau": "BUDGET"}

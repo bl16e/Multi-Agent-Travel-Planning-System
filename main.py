@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from utils.schemas import FinalTravelPackageModel, PlanningRequest
 from utils.markdown_formatter import format_package_to_markdown
 from utils.path_safety import validate_request_id
+from utils.session_cache import InMemorySessionCache
 from utils.session_store import CorruptSessionError, JsonSessionStore, SessionStore, StoredSession
 from utils.settings import get_settings
 from workflow import ProvinceWorkflow
@@ -127,7 +128,10 @@ class ThreeProvinceTravelSystem:
 DEFAULT_ARTIFACT_DIR = Path(get_settings().output_dir)
 
 # Shared session store across all per-request ThreeProvinceTravelSystem instances
-_shared_sessions: dict[str, dict[str, Any]] = {}
+_shared_sessions = InMemorySessionCache(
+    max_entries=get_settings().session_cache_max_entries,
+    ttl_seconds=get_settings().session_cache_ttl_seconds,
+)
 
 
 def console_progress_reporter(line: str) -> None:
@@ -143,6 +147,92 @@ templates = Jinja2Templates(directory=_HERE / "templates")
 system = ThreeProvinceTravelSystem(artifact_dir=DEFAULT_ARTIFACT_DIR)
 
 
+def create_travel_system(progress_reporter: Callable[[str], None] | None = None) -> ThreeProvinceTravelSystem:
+    return ThreeProvinceTravelSystem(
+        artifact_dir=DEFAULT_ARTIFACT_DIR,
+        progress_reporter=progress_reporter,
+    )
+
+
+def _planning_failure_detail() -> dict[str, str]:
+    return {"error": "planning_failed", "message": "Planning workflow failed"}
+
+
+def _result_to_jsonable(result: FinalTravelPackageModel | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(result, FinalTravelPackageModel):
+        return result.model_dump(mode="json")
+    return result
+
+
+def _cache_planner_sessions(planner: Any) -> None:
+    for request_id, session in getattr(planner, "sessions", {}).items():
+        _shared_sessions.set(request_id, session)
+
+
+async def _execute_plan_request(
+    request: PlanningRequest,
+    *,
+    progress_reporter: Callable[[str], None] | None = None,
+    human_resume: HumanResumePayload | None = None,
+) -> FinalTravelPackageModel | dict[str, Any]:
+    planner = create_travel_system(progress_reporter=progress_reporter)
+    if human_resume is None:
+        result = await planner.plan_trip(request)
+    else:
+        result = await planner.plan_trip(request, human_resume=human_resume)
+    _cache_planner_sessions(planner)
+    return result
+
+
+def _load_resume_session(request_id: str) -> dict[str, Any] | None:
+    safe_request_id = validate_request_id(request_id)
+    return _shared_sessions.get(safe_request_id) or system._load_session(safe_request_id)
+
+
+def _sse_event(name: str, data: dict[str, Any]) -> str:
+    return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+def _stream_execution(
+    request: PlanningRequest,
+    *,
+    human_resume: HumanResumePayload | None = None,
+) -> StreamingResponse:
+    queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
+
+    def progress_reporter(line: str) -> None:
+        queue.put_nowait(("progress", {"line": line}))
+
+    async def run_workflow() -> None:
+        try:
+            result = await _execute_plan_request(
+                request,
+                progress_reporter=progress_reporter,
+                human_resume=human_resume,
+            )
+            queue.put_nowait(("result", _result_to_jsonable(result)))
+        except Exception:
+            queue.put_nowait(("error", _planning_failure_detail()))
+        finally:
+            queue.put_nowait(None)
+
+    async def event_generator():
+        task = asyncio.create_task(run_workflow())
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    yield _sse_event("done", {})
+                    break
+                name, data = event
+                yield _sse_event(name, data)
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": "three-provinces-six-bureaus"}
@@ -155,56 +245,13 @@ async def index(request: Request):
 
 @app.post("/plan/stream")
 async def plan_stream(request: PlanningRequest):
-    queue: asyncio.Queue[str | None] = asyncio.Queue()
-
-    def progress_reporter(line: str) -> None:
-        queue.put_nowait(line)
-
-    async def run_workflow():
-        stream_system = ThreeProvinceTravelSystem(
-            artifact_dir=DEFAULT_ARTIFACT_DIR,
-            progress_reporter=progress_reporter,
-        )
-        try:
-            result = await stream_system.plan_trip(request)
-            # Persist session to shared store for resume
-            _shared_sessions.update(stream_system.sessions)
-            if isinstance(result, FinalTravelPackageModel):
-                data = result.model_dump(mode="json")
-                queue.put_nowait(f"__RESULT__:{json.dumps(data, ensure_ascii=False, default=str)}")
-            else:
-                queue.put_nowait(f"__RESULT__:{json.dumps(result, ensure_ascii=False, default=str)}")
-        except Exception as e:
-            queue.put_nowait(f"__ERROR__:{str(e)}")
-        finally:
-            queue.put_nowait(None)
-
-    async def event_generator():
-        task = asyncio.create_task(run_workflow())
-        try:
-            while True:
-                msg = await queue.get()
-                if msg is None:
-                    yield "event: done\ndata: {}\n\n"
-                    break
-                if msg.startswith("__RESULT__:"):
-                    yield f"event: result\ndata: {msg[11:]}\n\n"
-                elif msg.startswith("__ERROR__:"):
-                    yield f"event: error\ndata: {json.dumps({'error': msg[10:]})}\n\n"
-                else:
-                    yield f"event: progress\ndata: {json.dumps({'line': msg}, ensure_ascii=False)}\n\n"
-        except asyncio.CancelledError:
-            task.cancel()
-            raise
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return _stream_execution(request)
 
 
 @app.post("/resume/{request_id}/stream")
 async def resume_stream(request_id: str, payload: HumanResumePayload):
     try:
-        request_id = validate_request_id(request_id)
-        session = _shared_sessions.get(request_id) or system._load_session(request_id)
+        session = _load_resume_session(request_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}") from exc
     except CorruptSessionError as exc:
@@ -213,48 +260,7 @@ async def resume_stream(request_id: str, payload: HumanResumePayload):
         raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}")
 
     original_request: PlanningRequest = session["request"]
-    queue: asyncio.Queue[str | None] = asyncio.Queue()
-
-    def progress_reporter(line: str) -> None:
-        queue.put_nowait(line)
-
-    async def run_workflow():
-        stream_system = ThreeProvinceTravelSystem(
-            artifact_dir=DEFAULT_ARTIFACT_DIR,
-            progress_reporter=progress_reporter,
-        )
-        try:
-            result = await stream_system.plan_trip(original_request, human_resume=payload)
-            _shared_sessions.update(stream_system.sessions)
-            if isinstance(result, FinalTravelPackageModel):
-                data = result.model_dump(mode="json")
-                queue.put_nowait(f"__RESULT__:{json.dumps(data, ensure_ascii=False, default=str)}")
-            else:
-                queue.put_nowait(f"__RESULT__:{json.dumps(result, ensure_ascii=False, default=str)}")
-        except Exception as e:
-            queue.put_nowait(f"__ERROR__:{str(e)}")
-        finally:
-            queue.put_nowait(None)
-
-    async def event_generator():
-        task = asyncio.create_task(run_workflow())
-        try:
-            while True:
-                msg = await queue.get()
-                if msg is None:
-                    yield "event: done\ndata: {}\n\n"
-                    break
-                if msg.startswith("__RESULT__:"):
-                    yield f"event: result\ndata: {msg[11:]}\n\n"
-                elif msg.startswith("__ERROR__:"):
-                    yield f"event: error\ndata: {json.dumps({'error': msg[10:]})}\n\n"
-                else:
-                    yield f"event: progress\ndata: {json.dumps({'line': msg}, ensure_ascii=False)}\n\n"
-        except asyncio.CancelledError:
-            task.cancel()
-            raise
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return _stream_execution(original_request, human_resume=payload)
 
 
 @app.get("/download/{request_id:path}")
@@ -275,15 +281,18 @@ async def download_artifact(request_id: str):
 @app.post("/plan")
 async def plan_trip(request: PlanningRequest) -> Any:
     try:
-        return await system.plan_trip(request)
+        return await _execute_plan_request(request)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail="Planning workflow failed") from exc
+        raise HTTPException(status_code=500, detail=_planning_failure_detail()) from exc
 
 
 @app.post("/resume/{request_id}")
 async def resume_trip(request_id: str, payload: HumanResumePayload) -> Any:
     try:
-        return await system.resume_trip(request_id, payload)
+        session = _load_resume_session(request_id)
+        if not session:
+            raise KeyError(f"Unknown request_id: {request_id}")
+        return await _execute_plan_request(session["request"], human_resume=payload)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}") from exc
     except CorruptSessionError as exc:
