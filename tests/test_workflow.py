@@ -88,3 +88,38 @@ def test_route_to_liubu_keeps_each_task_payload_isolated():
     assert [send.node for send in sends] == ["liubu_weather", "liubu_budget"]
     assert sends[0].arg["payload"] == {"target_bureau": "WEATHER"}
     assert sends[1].arg["payload"] == {"target_bureau": "BUDGET"}
+
+
+@pytest.mark.asyncio
+async def test_finish_human_creates_boundary_resume_state():
+    workflow = ProvinceWorkflow()
+    request = PlanningRequest(
+        request_id="resume_boundary",
+        user_message="Test trip to Tokyo",
+        profile=TravelerProfile(
+            destination_preferences=["Tokyo"],
+            origin_city="Beijing",
+            start_date="2026-05-01",
+            end_date="2026-05-03",
+            total_budget=5000,
+        ),
+    )
+    context = workflow.orchestrator.bootstrap(request.request_id, request.model_dump(mode="json"))
+    context.pending_user_inputs.append("Need budget")
+
+    result = await workflow._node_finish_human(
+        {
+            "request": request.model_dump(mode="json"),
+            "context": context,
+            "status": "HUMAN_INTERVENE",
+            "question": "Need budget",
+        }
+    )
+
+    assert result["status"] == "HUMAN_INTERVENE"
+    assert result["resume_mode"] == "boundary"
+    assert result["resume_state"]["mode"] == "boundary"
+    assert result["resume_state"]["next_node"] == "zhongshu_itinerary"
+    assert result["resume_state"]["question"] == "Need budget"
+    assert result["resume_state"]["state"]["request"]["request_id"] == "resume_boundary"
+    assert result["resume_state"]["state"]["context"]["request_id"] == "resume_boundary"

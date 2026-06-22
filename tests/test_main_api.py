@@ -63,6 +63,16 @@ def parse_sse_events(body: str) -> list[tuple[str, dict]]:
     return events
 
 
+def make_resume_state(request: PlanningRequest) -> dict:
+    return {
+        "mode": "boundary",
+        "next_node": "zhongshu_itinerary",
+        "question": "Need budget",
+        "state": {"request": request.model_dump(mode="json")},
+        "created_at": "2026-06-22T00:00:00+00:00",
+    }
+
+
 @pytest.mark.asyncio
 async def test_resume_trip_uses_json_session_store(tmp_path):
     store = JsonSessionStore(tmp_path)
@@ -276,3 +286,140 @@ def test_dashboard_returns_conflict_for_corrupt_session(tmp_path, monkeypatch):
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Stored session is corrupt"
+
+
+def test_dashboard_exposes_resume_metadata(tmp_path, monkeypatch):
+    store = JsonSessionStore(tmp_path)
+    request = make_request("dashboard_resume", total_budget=None)
+    store.save(
+        main.StoredSession(
+            request_id="dashboard_resume",
+            request=request.model_dump(mode="json"),
+            status="HUMAN_INTERVENE",
+            context_snapshot={
+                "current_state": "HUMAN_INTERVENE",
+                "pending_user_inputs": ["Need budget"],
+                "progress_events": [{"stage": "preflight"}],
+            },
+            resume_mode="boundary",
+            resume_state=make_resume_state(request),
+            result={"status": "HUMAN_INTERVENE", "question": "Need budget"},
+        )
+    )
+    monkeypatch.setattr(main, "system", ThreeProvinceTravelSystem(session_store=store))
+
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.get("/dashboard/dashboard_resume")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["resume_mode"] == "boundary"
+    assert data["resume_state"]["mode"] == "boundary"
+    assert data["resume_state"]["next_node"] == "zhongshu_itinerary"
+
+
+def test_resume_api_response_includes_contract_resume_fields(monkeypatch):
+    request = make_request("resume_contract", total_budget=None)
+    main._shared_sessions.set(
+        "resume_contract",
+        {
+            "request": request,
+            "status": "HUMAN_INTERVENE",
+            "resume_mode": "boundary",
+            "resume_state": make_resume_state(request),
+        },
+    )
+
+    class ResumeFakeSystem:
+        def __init__(self, artifact_dir=None, progress_reporter=None):
+            self.sessions = {}
+
+        async def plan_trip(self, *args, **kwargs):
+            raise AssertionError("resume endpoint should use boundary resume, not plan replay")
+
+        async def resume_trip(self, request_id, payload):
+            result = {
+                "status": "HUMAN_INTERVENE",
+                "request_id": request_id,
+                "question": "Need budget",
+                "resume_mode": "boundary",
+                "resume_state": make_resume_state(request),
+            }
+            self.sessions[request_id] = {
+                "request": request,
+                "status": "HUMAN_INTERVENE",
+                "result": result,
+                "resume_mode": "boundary",
+                "resume_state": result["resume_state"],
+            }
+            return result
+
+    monkeypatch.setattr(main, "ThreeProvinceTravelSystem", ResumeFakeSystem)
+    client = TestClient(main.app, raise_server_exceptions=False)
+
+    response = client.post(
+        "/resume/resume_contract",
+        json={"profile_updates": {"total_budget": 2500}},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "HUMAN_INTERVENE"
+    assert data["resume_mode"] == "boundary"
+    assert data["resume_state"]["mode"] == "boundary"
+
+
+def test_resume_stream_emits_labeled_resume_events(monkeypatch):
+    request = make_request("stream_resume_contract", total_budget=None)
+    main._shared_sessions.set(
+        "stream_resume_contract",
+        {
+            "request": request,
+            "status": "HUMAN_INTERVENE",
+            "resume_mode": "boundary",
+            "resume_state": make_resume_state(request),
+        },
+    )
+
+    class ResumeStreamingFakeSystem:
+        def __init__(self, artifact_dir=None, progress_reporter=None):
+            self.progress_reporter = progress_reporter
+            self.sessions = {}
+
+        async def plan_trip(self, *args, **kwargs):
+            raise AssertionError("streaming resume should use resume_trip")
+
+        async def resume_trip(self, request_id, payload):
+            if self.progress_reporter:
+                self.progress_reporter(f"resuming {request_id} with boundary")
+            result = {
+                "status": "HUMAN_INTERVENE",
+                "request_id": request_id,
+                "question": "Need budget",
+                "resume_mode": "boundary",
+                "resume_state": make_resume_state(request),
+            }
+            self.sessions[request_id] = {
+                "request": request,
+                "status": "HUMAN_INTERVENE",
+                "result": result,
+                "resume_mode": "boundary",
+                "resume_state": result["resume_state"],
+            }
+            return result
+
+    monkeypatch.setattr(main, "ThreeProvinceTravelSystem", ResumeStreamingFakeSystem)
+    client = TestClient(main.app, raise_server_exceptions=False)
+
+    response = client.post(
+        "/resume/stream_resume_contract/stream",
+        json={"profile_updates": {"total_budget": 2500}},
+    )
+
+    assert response.status_code == 200
+    events = parse_sse_events(response.text)
+    result = next(data for name, data in events if name == "result")
+    progress = [data["line"] for name, data in events if name == "progress"]
+    assert result["resume_mode"] == "boundary"
+    assert result["resume_state"]["mode"] == "boundary"
+    assert any("boundary" in line for line in progress)

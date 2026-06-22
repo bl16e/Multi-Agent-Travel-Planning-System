@@ -40,18 +40,7 @@ class ThreeProvinceTravelSystem:
     async def plan_trip(self, request: PlanningRequest, human_resume: HumanResumePayload | None = None) -> FinalTravelPackageModel | dict[str, Any]:
         effective_request = self._merge_request(request, human_resume)
         result = await self.workflow.run(effective_request)
-        session = {"request": effective_request, "context": result.get("context"), "status": result.get("status", "UNKNOWN"), "result": result}
-        self.sessions[effective_request.request_id] = session
-        if result.get("status") == "DONE":
-            package = FinalTravelPackageModel.model_validate(result["final_package"])
-            session["package"] = package
-            self._persist_session(effective_request.request_id, session)
-            return package
-        self._persist_session(effective_request.request_id, session)
-        if result.get("status") == "REJECTED":
-            return result.get("rejected_payload", result)
-        context = result.get("context")
-        return {"status": result.get("status", "HUMAN_INTERVENE"), "request_id": effective_request.request_id, "question": result.get("question"), "dashboard_url": self.workflow.orchestrator.build_dashboard_link(context) if context else None, "progress_events": context.progress_events if context else []}
+        return self._record_workflow_result(effective_request, result)
 
     async def resume_trip(self, request_id: str, payload: HumanResumePayload) -> FinalTravelPackageModel | dict[str, Any]:
         request_id = validate_request_id(request_id)
@@ -59,7 +48,38 @@ class ThreeProvinceTravelSystem:
         if not session:
             raise KeyError(f"Unknown request_id: {request_id}")
         request: PlanningRequest = session["request"]
-        return await self.plan_trip(request, human_resume=payload)
+        resume_state = session.get("resume_state") or {}
+        if resume_state.get("mode") == "boundary":
+            try:
+                result = await self.workflow.resume(resume_state, payload)
+                effective_request = self._merge_request(request, payload)
+                return self._record_workflow_result(
+                    effective_request,
+                    result,
+                    resume_mode="boundary",
+                    resume_state=resume_state,
+                    include_resume_metadata=True,
+                )
+            except (KeyError, TypeError, ValueError):
+                pass
+        replay_reason = "Stored session has no compatible boundary resume state."
+        result = await self.workflow.run(self._merge_request(request, payload))
+        replay_state = {
+            "mode": "replay",
+            "next_node": None,
+            "state": {},
+            "question": session.get("result", {}).get("question"),
+            "created_at": datetime.now().astimezone().isoformat(),
+            "replay_reason": replay_reason,
+        }
+        return self._record_workflow_result(
+            self._merge_request(request, payload),
+            result,
+            resume_mode="replay",
+            resume_state=replay_state,
+            replay_reason=replay_reason,
+            include_resume_metadata=True,
+        )
 
     def dashboard_snapshot(self, request_id: str) -> dict[str, Any]:
         request_id = validate_request_id(request_id)
@@ -68,7 +88,18 @@ class ThreeProvinceTravelSystem:
             raise KeyError(request_id)
         context = session.get("context")
         context_snapshot = session.get("context_snapshot") or self._context_snapshot(context)
-        return {"request_id": request_id, "status": session.get("status"), "current_state": context_snapshot.get("current_state"), "pending_user_inputs": context_snapshot.get("pending_user_inputs", []), "progress_events": context_snapshot.get("progress_events", []), "has_package": "package" in session and session.get("package") is not None}
+        resume_state = session.get("resume_state") or {}
+        return {
+            "request_id": request_id,
+            "status": session.get("status"),
+            "current_state": context_snapshot.get("current_state"),
+            "pending_user_inputs": context_snapshot.get("pending_user_inputs", []),
+            "progress_events": context_snapshot.get("progress_events", []),
+            "has_package": "package" in session and session.get("package") is not None,
+            "resume_mode": session.get("resume_mode", "none"),
+            "resume_state": resume_state,
+            "replay_reason": resume_state.get("replay_reason") or session.get("replay_reason"),
+        }
 
     def _merge_request(self, request: PlanningRequest, human_resume: HumanResumePayload | None) -> PlanningRequest:
         if human_resume is None:
@@ -91,6 +122,8 @@ class ThreeProvinceTravelSystem:
                 context_snapshot=self._context_snapshot(session.get("context")),
                 result=self._serializable_result(session.get("result", {})),
                 package=package.model_dump(mode="json") if hasattr(package, "model_dump") else package,
+                resume_state=session.get("resume_state") or {},
+                resume_mode=session.get("resume_mode", "none"),
             )
         )
 
@@ -103,6 +136,8 @@ class ThreeProvinceTravelSystem:
             "status": stored.status,
             "context_snapshot": stored.context_snapshot,
             "result": stored.result,
+            "resume_state": stored.resume_state,
+            "resume_mode": stored.resume_mode,
         }
         if stored.package is not None:
             session["package"] = FinalTravelPackageModel.model_validate(stored.package)
@@ -123,6 +158,70 @@ class ThreeProvinceTravelSystem:
         serialized = dict(result)
         serialized.pop("context", None)
         return serialized
+
+    def _record_workflow_result(
+        self,
+        request: PlanningRequest,
+        result: dict[str, Any],
+        *,
+        resume_mode: str | None = None,
+        resume_state: dict[str, Any] | None = None,
+        replay_reason: str | None = None,
+        include_resume_metadata: bool = False,
+    ) -> FinalTravelPackageModel | dict[str, Any]:
+        effective_resume_mode = resume_mode or result.get("resume_mode") or "none"
+        effective_resume_state = resume_state if resume_state is not None else result.get("resume_state", {})
+        session = {
+            "request": request,
+            "context": result.get("context"),
+            "status": result.get("status", "UNKNOWN"),
+            "result": result,
+            "resume_mode": effective_resume_mode,
+            "resume_state": effective_resume_state or {},
+        }
+        if replay_reason:
+            session["replay_reason"] = replay_reason
+        self.sessions[request.request_id] = session
+        if result.get("status") == "DONE":
+            package = FinalTravelPackageModel.model_validate(result["final_package"])
+            session["package"] = package
+            self._persist_session(request.request_id, session)
+            if include_resume_metadata:
+                response = package.model_dump(mode="json")
+                response.update(self._resume_response_fields(effective_resume_mode, effective_resume_state, replay_reason))
+                return response
+            return package
+        self._persist_session(request.request_id, session)
+        if result.get("status") == "REJECTED":
+            response = dict(result.get("rejected_payload", result))
+            if include_resume_metadata:
+                response.update(self._resume_response_fields(effective_resume_mode, effective_resume_state, replay_reason))
+            return response
+        context = result.get("context")
+        response = {
+            "status": result.get("status", "HUMAN_INTERVENE"),
+            "request_id": request.request_id,
+            "question": result.get("question"),
+            "dashboard_url": self.workflow.orchestrator.build_dashboard_link(context) if context else None,
+            "progress_events": context.progress_events if context else result.get("progress_events", []),
+        }
+        if result.get("resume_mode") or include_resume_metadata:
+            response.update(self._resume_response_fields(effective_resume_mode, effective_resume_state, replay_reason))
+        return response
+
+    def _resume_response_fields(
+        self,
+        resume_mode: str,
+        resume_state: dict[str, Any] | None,
+        replay_reason: str | None,
+    ) -> dict[str, Any]:
+        fields: dict[str, Any] = {
+            "resume_mode": resume_mode,
+            "resume_state": resume_state or {},
+        }
+        if replay_reason:
+            fields["replay_reason"] = replay_reason
+        return fields
 
 
 DEFAULT_ARTIFACT_DIR = Path(get_settings().output_dir)
@@ -184,6 +283,23 @@ async def _execute_plan_request(
     return result
 
 
+async def _execute_resume_request(
+    request_id: str,
+    payload: HumanResumePayload,
+    *,
+    progress_reporter: Callable[[str], None] | None = None,
+) -> FinalTravelPackageModel | dict[str, Any]:
+    session = _load_resume_session(request_id)
+    if not session:
+        raise KeyError(f"Unknown request_id: {request_id}")
+    planner = create_travel_system(progress_reporter=progress_reporter)
+    safe_request_id = validate_request_id(request_id)
+    planner.sessions[safe_request_id] = session
+    result = await planner.resume_trip(safe_request_id, payload)
+    _cache_planner_sessions(planner)
+    return result
+
+
 def _load_resume_session(request_id: str) -> dict[str, Any] | None:
     safe_request_id = validate_request_id(request_id)
     return _shared_sessions.get(safe_request_id) or system._load_session(safe_request_id)
@@ -209,6 +325,42 @@ def _stream_execution(
                 request,
                 progress_reporter=progress_reporter,
                 human_resume=human_resume,
+            )
+            queue.put_nowait(("result", _result_to_jsonable(result)))
+        except Exception:
+            queue.put_nowait(("error", _planning_failure_detail()))
+        finally:
+            queue.put_nowait(None)
+
+    async def event_generator():
+        task = asyncio.create_task(run_workflow())
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    yield _sse_event("done", {})
+                    break
+                name, data = event
+                yield _sse_event(name, data)
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+def _stream_resume_execution(request_id: str, payload: HumanResumePayload) -> StreamingResponse:
+    queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
+
+    def progress_reporter(line: str) -> None:
+        queue.put_nowait(("progress", {"line": line}))
+
+    async def run_workflow() -> None:
+        try:
+            result = await _execute_resume_request(
+                request_id,
+                payload,
+                progress_reporter=progress_reporter,
             )
             queue.put_nowait(("result", _result_to_jsonable(result)))
         except Exception:
@@ -259,8 +411,7 @@ async def resume_stream(request_id: str, payload: HumanResumePayload):
     if not session:
         raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}")
 
-    original_request: PlanningRequest = session["request"]
-    return _stream_execution(original_request, human_resume=payload)
+    return _stream_resume_execution(request_id, payload)
 
 
 @app.get("/download/{request_id:path}")
@@ -289,10 +440,7 @@ async def plan_trip(request: PlanningRequest) -> Any:
 @app.post("/resume/{request_id}")
 async def resume_trip(request_id: str, payload: HumanResumePayload) -> Any:
     try:
-        session = _load_resume_session(request_id)
-        if not session:
-            raise KeyError(f"Unknown request_id: {request_id}")
-        return await _execute_plan_request(session["request"], human_resume=payload)
+        return await _execute_resume_request(request_id, payload)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}") from exc
     except CorruptSessionError as exc:
