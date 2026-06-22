@@ -31,6 +31,20 @@ def _default_amap_mcp_url() -> str | None:
     return None
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return int(raw)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
 class AppSettings(BaseModel):
     qwen_api_key: str | None = Field(default_factory=lambda: os.getenv("QWEN_API_KEY"))
     qwen_model: str = Field(default_factory=lambda: os.getenv("QWEN_MODEL", "qwen-plus"))
@@ -47,6 +61,10 @@ class AppSettings(BaseModel):
     serpapi_api_key: str | None = Field(default_factory=lambda: os.getenv("SERPAPI_API_KEY"))
     run_live_tests: bool = Field(default_factory=lambda: os.getenv("RUN_LIVE_TESTS") == "1")
     session_store_dir: str = Field(default_factory=lambda: os.getenv("SESSION_STORE_DIR", str(PROJECT_ROOT / "artifacts" / "sessions")))
+    session_cache_max_entries: int = Field(default_factory=lambda: _env_int("SESSION_CACHE_MAX_ENTRIES", 500))
+    session_cache_ttl_seconds: int = Field(default_factory=lambda: _env_int("SESSION_CACHE_TTL_SECONDS", 86400))
+    enable_langgraph_interrupts: bool = Field(default_factory=lambda: _env_bool("ENABLE_LANGGRAPH_INTERRUPTS"))
+    qwen_timeout_seconds: int = Field(default_factory=lambda: _env_int("QWEN_TIMEOUT_SECONDS", 60))
 
 
 @lru_cache(maxsize=1)

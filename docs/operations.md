@@ -15,6 +15,10 @@ Live mode is opt-in. Set `QWEN_API_KEY` and any tool keys you need, then set `RU
 - `SERPAPI_API_KEY`: Optional SerpAPI key.
 - `OUTPUT_DIR`: artifact output directory. Defaults to `artifacts`.
 - `SESSION_STORE_DIR`: JSON session directory. Defaults to `artifacts/sessions`.
+- `SESSION_CACHE_MAX_ENTRIES`: maximum in-memory runtime session cache entries. Defaults to `500`.
+- `SESSION_CACHE_TTL_SECONDS`: runtime session cache entry lifetime in seconds. Defaults to `86400` (24 hours).
+- `ENABLE_LANGGRAPH_INTERRUPTS`: set to `1` only for an explicitly configured interrupt/checkpoint runtime. Defaults to `0` so the HTTP service returns resumable human-intervention responses instead of waiting indefinitely.
+- `QWEN_TIMEOUT_SECONDS`: timeout in seconds for Qwen/OpenAI-compatible structured generation calls. Defaults to `60`.
 - `RUN_LIVE_TESTS`: set to `1` to enable live tests.
 
 ## Tests
@@ -65,4 +69,4 @@ Generated Markdown and iCalendar files are written under `OUTPUT_DIR` or the con
 
 Offline budget fallback estimates activities, accommodation, food, local transport, origin-destination transport, and incidentals from trip length, travelers, and budget level. These are planning estimates, not live prices.
 
-Sessions are stored as JSON files under `SESSION_STORE_DIR`. Writes use a temporary file and atomic replacement. If a stored session cannot be parsed or validated, resume/dashboard APIs return HTTP 409. A resumed request can recover the original request payload and current status, but in-memory LangGraph execution state is not checkpointed.
+Sessions are stored as JSON files under `SESSION_STORE_DIR`. Writes use a temporary file and atomic replacement. If a stored session cannot be parsed or validated, resume/dashboard APIs return HTTP 409. Runtime session cache entries are bounded by `SESSION_CACHE_MAX_ENTRIES` and `SESSION_CACHE_TTL_SECONDS`; cache eviction must not delete the persisted JSON session. The default service mode keeps LangGraph interrupts disabled for public HTTP requests so human intervention is represented as structured, resumable state.

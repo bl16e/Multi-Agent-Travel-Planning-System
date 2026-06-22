@@ -10,6 +10,9 @@ from pydantic import BaseModel, Field, HttpUrl, model_validator
 from utils.permission_matrix import AgentRole
 from utils.state_machine import WorkflowState
 
+ExecutionStatus = Literal["ok", "fallback", "error"]
+DataSource = Literal["live", "structured_llm", "fallback_estimate", "unavailable"]
+
 
 class ConfirmationStatus(str, Enum):
     CONFIRMED = "confirmed"
@@ -206,6 +209,8 @@ class WeatherDayModel(BaseModel):
 
 class WeatherExecutionResult(BaseModel):
     bureau: Literal["WEATHER"] = "WEATHER"
+    status: ExecutionStatus = "fallback"
+    data_source: DataSource = "fallback_estimate"
     destination: str
     forecast_days: list[WeatherDayModel]
     packing_list: list[str]
@@ -229,9 +234,12 @@ class CalendarEventListModel(BaseModel):
 
 class CalendarExecutionResult(BaseModel):
     bureau: Literal["CALENDAR"] = "CALENDAR"
+    status: ExecutionStatus = "fallback"
+    data_source: DataSource = "fallback_estimate"
     calendar_file: Path
     events_created: int
     calendar_name: str
+    warnings: list[str] = Field(default_factory=list)
 
 
 class BudgetLineItemModel(BaseModel):
@@ -244,6 +252,8 @@ class BudgetLineItemModel(BaseModel):
 
 class BudgetExecutionResult(BaseModel):
     bureau: Literal["BUDGET"] = "BUDGET"
+    status: ExecutionStatus = "fallback"
+    data_source: DataSource = "fallback_estimate"
     currency: str
     budget_breakdown: list[BudgetLineItemModel]
     total_estimated_cost: float
@@ -263,10 +273,13 @@ class HotelOptionModel(BaseModel):
 
 class AccommodationExecutionResult(BaseModel):
     bureau: Literal["ACCOMMODATION"] = "ACCOMMODATION"
+    status: ExecutionStatus = "fallback"
+    data_source: DataSource = "fallback_estimate"
     destination: str
     hotel_options: list[HotelOptionModel] = Field(default_factory=list)
     booking_links: list[HttpUrl | str] = Field(default_factory=list)
     search_notes: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class FlightOptionModel(BaseModel):
@@ -284,6 +297,8 @@ class FlightOptionModel(BaseModel):
 
 class FlightTransportExecutionResult(BaseModel):
     bureau: Literal["FLIGHT_TRANSPORT"] = "FLIGHT_TRANSPORT"
+    status: ExecutionStatus = "fallback"
+    data_source: DataSource = "fallback_estimate"
     origin: str
     destination: str
     flight_options: list[FlightOptionModel] = Field(default_factory=list)

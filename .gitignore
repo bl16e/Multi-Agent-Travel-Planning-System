@@ -1,5 +1,7 @@
 # Environment variables
 .env
+.env.*
+!.env.example
 
 # Python
 __pycache__/
@@ -8,8 +10,10 @@ __pycache__/
 *.so
 .Python
 *.egg-info/
+.venv/
 dist/
 build/
+*.log
 
 # Virtual environments
 venv/
@@ -39,5 +43,6 @@ travel_plan.md
 # OS
 .DS_Store
 Thumbs.db
+*.tmp
 
 *.md
