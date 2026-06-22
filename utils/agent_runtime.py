@@ -81,7 +81,7 @@ async def run_structured_synthesis(
         try:
             return _offline_structured_output(output_model, {**variables, "fallback_reason": str(exc)})
         except RuntimeError as fallback_exc:
-            raise RuntimeError(f"Structured synthesis failed and no offline fallback exists: {exc}") from fallback_exc
+            raise RuntimeError(f"Structured synthesis failed and no offline fallback exists: {fallback_exc}") from exc
 
 
 def soul_path_for(file_path: str | Path) -> Path:
@@ -108,29 +108,31 @@ def _offline_itinerary_draft(output_model: Any, variables: dict[str, Any]) -> An
     for index in range(day_count):
         current = start + timedelta(days=index)
         interest = interests[index % len(interests)]
+        primary_title = f"{destination} {interest} route with named local checkpoints"
+        secondary_title = f"{destination} {interest} venue confirmation block"
         daily_plan.append(
             {
                 "day_index": index + 1,
                 "date": current,
                 "city": destination,
                 "theme": f"{destination} {interest}",
-                "summary": "Estimated offline itinerary block; not validated with real-time availability.",
+                "summary": f"Offline estimate for {destination} focused on {interest}; verify live opening hours before booking.",
                 "activities": [
                     {
                         "start_time": "09:00",
                         "end_time": "11:30",
-                        "title": f"{destination} orientation walk",
-                        "location_name": f"Central {destination}",
-                        "description": "Fallback activity generated without live search data.",
+                        "title": primary_title,
+                        "location_name": f"{destination} main visitor district",
+                        "description": f"Input-derived offline plan segment for {interest}; replace with live venue details before booking.",
                         "estimated_cost": 0,
                         "status": "pending",
                     },
                     {
                         "start_time": "14:00",
                         "end_time": "16:30",
-                        "title": f"{interest.title()} focused visit",
-                        "location_name": destination,
-                        "description": "Estimated attraction slot; confirm opening hours before booking.",
+                        "title": secondary_title,
+                        "location_name": f"{destination} {interest} area",
+                        "description": "Offline estimate derived from traveler interests; confirm named venues, opening hours, and ticket availability.",
                         "estimated_cost": 40,
                         "status": "pending",
                     },
@@ -147,6 +149,7 @@ def _offline_itinerary_draft(output_model: Any, variables: dict[str, Any]) -> An
             "daily_plan": daily_plan,
             "planning_notes": [
                 "Did not use real-time data; verify hours, prices, and booking availability.",
+                "data_source=fallback_estimate; status=fallback; offline synthesis did not use live travel data.",
                 str(variables.get("research_context") or ""),
             ],
             "pending_confirmations": [

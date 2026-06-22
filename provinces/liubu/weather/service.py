@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import date
 from pathlib import Path
 from typing import Any, TypedDict
@@ -10,6 +11,8 @@ from langgraph.graph import END, StateGraph
 from utils.agent_runtime import run_react_mcp_task, soul_path_for
 from utils.schemas import WeatherExecutionResult
 from utils.llm_factory import build_qwen_chat
+
+logger = logging.getLogger(__name__)
 
 
 class WeatherState(TypedDict, total=False):
@@ -68,9 +71,14 @@ class WeatherBureau:
                     ("user", "Destination: {destination}\nDaily plan: {daily_plan}\nResearch notes: {research_notes}\nReturn structured weather guidance."),
                 ])
                 result = await (prompt | structured).ainvoke({"destination": state["destination"], "daily_plan": str(state.get("daily_plan", [])), "research_notes": state.get("research_notes", "")})
-                return {"result": result.model_dump(mode="json")}
-            except Exception:
-                pass
+                data = result.model_dump(mode="json")
+                data.update({"status": "ok", "data_source": "structured_llm"})
+                return {"result": data}
+            except Exception as exc:
+                logger.warning("Weather structured synthesis failed; using fallback result: %s", exc)
+                failure_warning = f"Weather structured synthesis failed: {exc}"
+        else:
+            failure_warning = "Weather structured synthesis unavailable; using fallback estimate."
         fallback_date = date.today()
-        result = WeatherExecutionResult(destination=state["destination"], forecast_days=[{"date": fallback_date, "condition": "Weather unavailable", "min_temp_c": 18, "max_temp_c": 26, "precipitation_probability": 0.2, "activity_suitability": "Use flexible scheduling.", "clothing_advice": ["Pack light layers."], "warnings": ["MCP research unavailable."], "is_estimated": True}], packing_list=["passport", "phone charger", "comfortable walking shoes", "light layers"], warnings=["Weather output fell back because MCP or structured synthesis failed."], summary=state.get("research_notes", "Fallback weather guidance."))
+        result = WeatherExecutionResult(destination=state["destination"], forecast_days=[{"date": fallback_date, "condition": "Weather unavailable", "min_temp_c": 18, "max_temp_c": 26, "precipitation_probability": 0.2, "activity_suitability": "Use flexible scheduling.", "clothing_advice": ["Pack light layers."], "warnings": ["MCP research unavailable."], "is_estimated": True}], packing_list=["passport", "phone charger", "comfortable walking shoes", "light layers"], warnings=["Weather output fell back because MCP or structured synthesis failed.", failure_warning], summary=state.get("research_notes", "Fallback weather guidance."))
         return {"result": result.model_dump(mode="json")}

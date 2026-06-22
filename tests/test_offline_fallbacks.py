@@ -1,7 +1,11 @@
 import pytest
 
+import utils.agent_runtime as agent_runtime
 from provinces.liubu.flight_transport.service import FlightTransportBureau
 from provinces.liubu.accommodation.service import AccommodationBureau
+from provinces.liubu.budget.service import BudgetBureau
+from utils.schemas import ItineraryDraftModel
+from workflow import build_markdown
 
 
 @pytest.mark.asyncio
@@ -88,3 +92,101 @@ async def test_accommodation_fallback_uses_trip_night_count():
     first_hotel = result["hotel_options"][0]
     assert first_hotel["nightly_rate"] == 140
     assert first_hotel["total_rate"] == 420
+
+
+def test_offline_zhongshu_draft_has_provenance_and_no_generic_placeholders():
+    draft = agent_runtime._offline_structured_output(
+        ItineraryDraftModel,
+        {
+            "destination": "Kyoto",
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "interests": "temples, food",
+            "research_context": agent_runtime.FALLBACK_MESSAGE,
+        },
+    )
+
+    serialized = str(draft.model_dump(mode="json")).lower()
+    assert any("data_source=fallback_estimate" in note for note in draft.planning_notes)
+    assert "orientation walk" not in serialized
+    assert "fallback activity" not in serialized
+    assert "estimated attraction slot" not in serialized
+    assert "kyoto" in serialized
+
+
+@pytest.mark.asyncio
+async def test_liubu_fallback_outputs_expose_status_and_data_source():
+    result = await BudgetBureau().run(
+        {
+            "approved_draft": {
+                "destination": "Kyoto",
+                "itinerary_draft": {
+                    "destination": "Kyoto",
+                    "daily_plan": [{"date": "2026-05-01", "activities": []}],
+                },
+            },
+            "execution_plan": {
+                "user_request": {
+                    "profile": {
+                        "currency": "USD",
+                        "total_budget": 1000,
+                    }
+                }
+            },
+        }
+    )
+
+    assert result["bureau"] == "BUDGET"
+    assert result["status"] == "fallback"
+    assert result["data_source"] == "fallback_estimate"
+    assert any("fallback" in warning.lower() for warning in result["warnings"])
+
+
+def test_shangshu_markdown_renders_bureau_data_source_labels(tmp_path):
+    request = type("Request", (), {"request_id": "offline_labels", "profile": type("Profile", (), {"currency": "USD"})()})()
+    path = build_markdown(
+        request,
+        {
+            "destination": "Kyoto",
+            "itinerary_draft": {
+                "daily_plan": [
+                    {
+                        "day_index": 1,
+                        "date": "2026-05-01",
+                        "theme": "Temples",
+                        "summary": "Visit named temples.",
+                        "activities": [],
+                    }
+                ]
+            },
+        },
+        {"verdict": "APPROVED", "data_source": "fallback_estimate", "warnings": ["offline review"]},
+        {
+            "WEATHER": {
+                "bureau": "WEATHER",
+                "status": "fallback",
+                "data_source": "fallback_estimate",
+                "summary": "Estimated weather",
+                "forecast_days": [],
+                "packing_list": [],
+                "warnings": ["offline weather"],
+            },
+            "BUDGET": {
+                "bureau": "BUDGET",
+                "status": "fallback",
+                "data_source": "fallback_estimate",
+                "currency": "USD",
+                "budget_breakdown": [],
+                "total_estimated_cost": 0,
+                "warnings": ["offline budget"],
+            },
+        },
+        "http://testserver/dashboard/offline_labels",
+        tmp_path,
+    )
+
+    content = path.read_text(encoding="utf-8")
+    assert "## Data Sources" in content
+    assert "WEATHER: fallback / fallback_estimate" in content
+    assert "BUDGET: fallback / fallback_estimate" in content
+    assert "Menxia Review: fallback_estimate" in content

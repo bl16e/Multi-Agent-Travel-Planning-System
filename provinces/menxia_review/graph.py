@@ -67,33 +67,54 @@ class MenxiaReviewAgent:
         revision_round = int(gov_dict.get("revision_round", 0))
 
         if profile.get("total_budget") is None:
-            verdict = ReviewVerdictModel(verdict="HUMAN_INTERVENE", summary="预算信息缺失，需要用户确认。", blocking_issues=["总预算未设置"], human_questions=["请提供旅行总预算"], review_notes=[])
+            verdict = ReviewVerdictModel(
+                verdict="HUMAN_INTERVENE",
+                summary="预算信息缺失，需要用户确认。",
+                blocking_issues=["总预算未设置"],
+                human_questions=["请提供旅行总预算"],
+                review_notes=[],
+                data_source="unavailable",
+                warnings=["Budget is missing; review cannot approve the draft."],
+            )
         else:
-            try:
-                verdict = await run_structured_synthesis(
-                    soul_path=self.soul_path,
-                    output_model=ReviewVerdictModel,
-                    user_prompt=(
-                        "审核中书省提交的行程草案，返回结构化审核结果。\n"
-                        "草案内容: {draft}\n"
-                        "用户需求: {user_request}\n\n"
-                        "审核标准：\n"
-                        "- 是否包含具体景点名称（非泛指区域）\n"
-                        "- 是否有真实预订链接\n"
-                        "- 是否有交通细节和时长\n"
-                        "- 是否有天气应急方案\n\n"
-                        "重要：你只能返回 APPROVED（通过）或 REJECTED（拒绝）。\n"
-                        "不要返回 HUMAN_INTERVENE，预订确认、餐厅预约等执行细节不需要用户介入。\n"
-                        "如果草案质量不足，使用 REJECTED 并在 revision_requests 中说明需要修改的内容。"
-                    ),
-                    variables={
-                        "draft": str(packet.model_dump(mode="json")),
-                        "user_request": str(state.get("user_request", {})),
-                    },
-                    timeout_seconds=200.0,
+            placeholder_issues = self._placeholder_issues(packet)
+            if placeholder_issues:
+                verdict = ReviewVerdictModel(
+                    verdict="REJECTED",
+                    summary="Draft contains generic placeholder itinerary content and cannot be approved.",
+                    blocking_issues=placeholder_issues,
+                    revision_requests=["Replace generic fallback itinerary blocks with named, user-specific places and verifiable details."],
+                    approved_bureaus=[],
+                    review_notes=["Deterministic placeholder guard ran before live or offline approval."],
+                    data_source="fallback_estimate",
+                    warnings=["Generic placeholder itinerary content was rejected before final package approval."],
                 )
-            except Exception:
-                verdict = self._offline_verdict(packet)
+            else:
+                try:
+                    verdict = await run_structured_synthesis(
+                        soul_path=self.soul_path,
+                        output_model=ReviewVerdictModel,
+                        user_prompt=(
+                            "审核中书省提交的行程草案，返回结构化审核结果。\n"
+                            "草案内容: {draft}\n"
+                            "用户需求: {user_request}\n\n"
+                            "审核标准：\n"
+                            "- 是否包含具体景点名称（非泛指区域）\n"
+                            "- 是否有真实预订链接\n"
+                            "- 是否有交通细节和时长\n"
+                            "- 是否有天气应急方案\n\n"
+                            "重要：你只能返回 APPROVED（通过）或 REJECTED（拒绝）。\n"
+                            "不要返回 HUMAN_INTERVENE，预订确认、餐厅预约等执行细节不需要用户介入。\n"
+                            "如果草案质量不足，使用 REJECTED 并在 revision_requests 中说明需要修改的内容。"
+                        ),
+                        variables={
+                            "draft": str(packet.model_dump(mode="json")),
+                            "user_request": str(state.get("user_request", {})),
+                        },
+                        timeout_seconds=200.0,
+                    )
+                except Exception:
+                    verdict = self._offline_verdict(packet)
             # Guard: AI should not return HUMAN_INTERVENE; downgrade to REJECTED
             if verdict.verdict == "HUMAN_INTERVENE":
                 verdict = ReviewVerdictModel(
@@ -103,6 +124,8 @@ class MenxiaReviewAgent:
                     revision_requests=verdict.revision_requests + verdict.human_questions,
                     human_questions=[],
                     review_notes=verdict.review_notes + ["[auto-downgraded from HUMAN_INTERVENE]"],
+                    data_source=verdict.data_source,
+                    warnings=verdict.warnings + ["Live review attempted to return HUMAN_INTERVENE; downgraded to REJECTED."],
                 )
 
         packet_out = MenxiaReviewPacketModel.model_validate({
@@ -123,6 +146,8 @@ class MenxiaReviewAgent:
                 "max_rejection_rounds": 2
             },
             "review_notes": verdict.review_notes,
+            "data_source": verdict.data_source,
+            "warnings": verdict.warnings,
         })
         return {"verdict_payload": packet_out.model_dump(mode="json")}
 
@@ -136,6 +161,8 @@ class MenxiaReviewAgent:
                 revision_requests=["Add at least one day with concrete activities."],
                 approved_bureaus=[],
                 review_notes=["Did not use real-time LLM review."],
+                data_source="fallback_estimate",
+                warnings=["Offline review rejected missing daily plan."],
             )
 
         missing_activity_days = [str(day.day_index) for day in daily_plan if not day.activities]
@@ -147,6 +174,8 @@ class MenxiaReviewAgent:
                 revision_requests=["Add concrete activity blocks before dispatching execution bureaus."],
                 approved_bureaus=[],
                 review_notes=["Did not use real-time LLM review."],
+                data_source="fallback_estimate",
+                warnings=["Offline review rejected days without activities."],
             )
 
         return ReviewVerdictModel(
@@ -154,7 +183,34 @@ class MenxiaReviewAgent:
             summary="Offline deterministic review approved the structurally complete draft.",
             approved_bureaus=list(packet.required_bureaus),
             review_notes=["Did not use real-time LLM review; approval is structural only."],
+            data_source="fallback_estimate",
+            warnings=["Offline structural review only; verify live availability before booking."],
         )
+
+    def _placeholder_issues(self, packet: ZhongshuDraftPacketModel) -> list[str]:
+        issues: list[str] = []
+        blocked_terms = (
+            "orientation walk",
+            "fallback activity",
+            "estimated attraction slot",
+            "placeholder recommendation",
+            "generic sightseeing",
+        )
+        for day in packet.itinerary_draft.daily_plan:
+            if "estimated offline itinerary block" in day.summary.lower():
+                issues.append(f"Day {day.day_index} summary contains generic placeholder wording.")
+            for activity in day.activities:
+                combined = " ".join(
+                    str(value or "")
+                    for value in (
+                        activity.title,
+                        activity.location_name,
+                        activity.description,
+                    )
+                ).lower()
+                if any(term in combined for term in blocked_terms):
+                    issues.append(f"Day {day.day_index} activity '{activity.title}' contains generic placeholder content.")
+        return issues
 
     def _normalize_draft_packet(self, draft: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(draft)

@@ -45,3 +45,25 @@ def test_runtime_settings_env_overrides(monkeypatch):
     assert settings.session_cache_ttl_seconds == 33
     assert settings.enable_langgraph_interrupts is True
     assert settings.qwen_timeout_seconds == 12
+
+
+def test_qwen_client_uses_configured_timeout(monkeypatch):
+    captured = {}
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setenv("QWEN_API_KEY", "test-key")
+    monkeypatch.setenv("QWEN_MODEL", "qwen-test")
+    monkeypatch.setenv("QWEN_BASE_URL", "https://example.test/v1")
+    monkeypatch.setenv("QWEN_TIMEOUT_SECONDS", "17")
+    get_settings.cache_clear()
+
+    import utils.llm_factory as llm_factory
+
+    monkeypatch.setattr(llm_factory, "ChatOpenAI", FakeChatOpenAI)
+    llm_factory.build_qwen_chat.cache_clear()
+
+    assert llm_factory.build_qwen_chat() is not None
+    assert captured["timeout"] == 17

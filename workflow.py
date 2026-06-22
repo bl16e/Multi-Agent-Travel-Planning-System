@@ -632,7 +632,19 @@ def build_markdown(request: PlanningRequest, draft_packet: dict[str, Any], revie
     accommodation = execution_results.get("ACCOMMODATION", {})
     flight = execution_results.get("FLIGHT_TRANSPORT", {})
     calendar = execution_results.get("CALENDAR", {})
-    lines: list[str] = [f"# {draft_packet['destination']} Travel Plan", "", "## Overview", f"- Request ID: {request.request_id}", f"- Review Verdict: {review_packet['verdict']}", f"- Dashboard: {dashboard_url}", f"- Calendar File: {calendar.get('calendar_file', '')}", "", "## Daily Itinerary"]
+    lines: list[str] = [f"# {draft_packet['destination']} Travel Plan", "", "## Overview", f"- Request ID: {request.request_id}", f"- Review Verdict: {review_packet['verdict']}", f"- Dashboard: {dashboard_url}", f"- Calendar File: {calendar.get('calendar_file', '')}", "", "## Data Sources", f"- Menxia Review: {review_packet.get('data_source', 'structured_llm')}"]
+    for bureau_name in ("WEATHER", "BUDGET", "ACCOMMODATION", "FLIGHT_TRANSPORT", "CALENDAR"):
+        result = execution_results.get(bureau_name)
+        if not result:
+            continue
+        lines.append(f"- {bureau_name}: {result.get('status', 'unknown')} / {result.get('data_source', 'unavailable')}")
+        warnings = result.get("warnings") or []
+        if warnings:
+            lines.append(f"  - Warnings: {'; '.join(str(item) for item in warnings)}")
+    review_warnings = review_packet.get("warnings") or []
+    if review_warnings:
+        lines.append(f"- Menxia Warnings: {'; '.join(str(item) for item in review_warnings)}")
+    lines.extend(["", "## Daily Itinerary"])
     for day in itinerary["daily_plan"]:
         lines.append(f"### Day {day['day_index']} - {day['date']} - {day['theme']}")
         lines.append(day["summary"])

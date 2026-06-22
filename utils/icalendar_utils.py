@@ -13,6 +13,10 @@ def build_ics_calendar(
     calendar_name: str,
     events: list[CalendarEventModel],
     output_path: Path,
+    *,
+    data_source: str | None = None,
+    status: str | None = None,
+    warnings: list[str] | None = None,
 ) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -20,6 +24,12 @@ def build_ics_calendar(
     calendar.add("prodid", "-//MASystem//Three Provinces Six Bureaus//EN")
     calendar.add("version", "2.0")
     calendar.add("x-wr-calname", calendar_name)
+    if data_source:
+        calendar.add("x-ma-data-source", data_source)
+    if status:
+        calendar.add("x-ma-status", status)
+    if warnings:
+        calendar.add("x-ma-warnings", "; ".join(warnings))
 
     for item in events:
         event = Event()

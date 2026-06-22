@@ -17,5 +17,5 @@ def build_qwen_chat() -> ChatOpenAI | None:
         api_key=settings.qwen_api_key,
         base_url=settings.qwen_base_url,
         temperature=0.2,
-        
+        timeout=settings.qwen_timeout_seconds,
     )

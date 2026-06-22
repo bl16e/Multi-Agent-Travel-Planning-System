@@ -171,6 +171,8 @@ class ReviewVerdictModel(BaseModel):
     human_questions: list[str] = Field(default_factory=list)
     approved_bureaus: list[Literal["WEATHER", "BUDGET", "ACCOMMODATION", "FLIGHT_TRANSPORT", "CALENDAR"]] = Field(default_factory=list)
     review_notes: list[str] = Field(default_factory=list)
+    data_source: DataSource = "structured_llm"
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ReviewGovernanceModel(BaseModel):
@@ -193,6 +195,8 @@ class MenxiaReviewPacketModel(BaseModel):
     approved_bureaus: list[Literal["WEATHER", "BUDGET", "ACCOMMODATION", "FLIGHT_TRANSPORT", "CALENDAR"]] = Field(default_factory=list)
     governance: ReviewGovernanceModel | dict[str, Any]
     review_notes: list[str] = Field(default_factory=list)
+    data_source: DataSource = "structured_llm"
+    warnings: list[str] = Field(default_factory=list)
 
 
 class WeatherDayModel(BaseModel):

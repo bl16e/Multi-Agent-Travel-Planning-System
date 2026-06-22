@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, TypedDict
 from urllib.parse import quote_plus
@@ -10,6 +11,8 @@ from langgraph.graph import END, StateGraph
 from utils.agent_runtime import run_react_mcp_task, soul_path_for
 from utils.schemas import FlightTransportExecutionResult
 from utils.llm_factory import build_qwen_chat
+
+logger = logging.getLogger(__name__)
 
 
 class FlightState(TypedDict, total=False):
@@ -78,9 +81,14 @@ class FlightTransportBureau:
                     ("user", "Origin: {origin}\nDestination: {destination}\nProfile: {profile}\nResearch notes: {research_notes}\nReturn a structured transport result."),
                 ])
                 result = await (prompt | structured).ainvoke({"origin": state["origin_city"], "destination": state["destination"], "profile": str(state.get("profile", {})), "research_notes": state.get("research_notes", "")})
-                return {"result": result.model_dump(mode="json")}
-            except Exception:
-                pass
+                data = result.model_dump(mode="json")
+                data.update({"status": "ok", "data_source": "structured_llm"})
+                return {"result": data}
+            except Exception as exc:
+                logger.warning("Flight transport structured synthesis failed; using fallback result: %s", exc)
+                failure_note = f"Flight transport structured synthesis failed: {exc}"
+        else:
+            failure_note = "Flight transport structured synthesis unavailable; using fallback estimate."
         origin_city = state["origin_city"]
         destination = state["destination"]
         profile = state.get("profile", {})
@@ -92,7 +100,7 @@ class FlightTransportBureau:
             {"airline": "Estimated direct-flight option", "price": 320.0, "currency": profile.get("currency", "USD"), "departure_airport": origin_city, "arrival_airport": destination, "departure_time": f"{departure_date} 08:30", "arrival_time": f"{departure_date} 12:15", "duration_minutes": 225, "booking_link": f"https://www.google.com/travel/flights?q={route_query}", "notes": f"{fallback_note} {research_note}"},
             {"airline": "Estimated connection option", "price": 255.0, "currency": profile.get("currency", "USD"), "departure_airport": origin_city, "arrival_airport": destination, "departure_time": f"{departure_date} 10:20", "arrival_time": f"{departure_date} 15:50", "duration_minutes": 330, "booking_link": f"https://www.skyscanner.com/transport/flights/{route_query}", "notes": f"{fallback_note} {research_note}"},
         ]
-        return {"result": FlightTransportExecutionResult(origin=origin_city, destination=destination, flight_options=options, transport_notes=[fallback_note, research_note], booking_links=[item["booking_link"] for item in options]).model_dump(mode="json")}
+        return {"result": FlightTransportExecutionResult(origin=origin_city, destination=destination, flight_options=options, transport_notes=[fallback_note, research_note, failure_note], booking_links=[item["booking_link"] for item in options]).model_dump(mode="json")}
 
     def _first_trip_date(self, daily_plan: list[dict[str, Any]]) -> str:
         for day in daily_plan:

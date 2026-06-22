@@ -30,6 +30,10 @@ class FailingStructuredLLM:
         raise RuntimeError("structured output unavailable")
 
 
+class UnsupportedOutputModel:
+    pass
+
+
 @pytest.mark.asyncio
 async def test_structured_synthesis_falls_back_when_live_llm_invocation_fails(monkeypatch):
     monkeypatch.setattr(agent_runtime, "build_qwen_chat", lambda: FakeLLM())
@@ -72,3 +76,21 @@ async def test_structured_synthesis_falls_back_when_live_structured_setup_fails(
 
     assert result.destination == "Kyoto"
     assert len(result.daily_plan) == 1
+
+
+@pytest.mark.asyncio
+async def test_structured_synthesis_preserves_original_exception_cause_when_no_fallback(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "build_qwen_chat", lambda: FakeLLM())
+    monkeypatch.setattr(agent_runtime, "ChatPromptTemplate", FakePromptTemplate)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await agent_runtime.run_structured_synthesis(
+            soul_path="provinces/zhongshu_itinerary/SOUL.md",
+            output_model=UnsupportedOutputModel,
+            user_prompt="ignored",
+            variables={"destination": "Tokyo"},
+        )
+
+    assert "Structured synthesis failed" in str(excinfo.value)
+    assert excinfo.value.__cause__ is not None
+    assert str(excinfo.value.__cause__) == "live provider unavailable"

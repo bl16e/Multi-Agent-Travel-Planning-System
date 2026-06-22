@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
@@ -13,6 +14,8 @@ from utils.path_safety import sanitize_request_id
 from utils.schemas import CalendarEventListModel, CalendarEventModel, CalendarExecutionResult
 from utils.llm_factory import build_qwen_chat
 
+logger = logging.getLogger(__name__)
+
 
 class CalendarState(TypedDict, total=False):
     payload: dict[str, Any]
@@ -20,6 +23,9 @@ class CalendarState(TypedDict, total=False):
     daily_plan: list[dict[str, Any]]
     research_notes: str
     events: list[dict[str, Any]]
+    calendar_status: str
+    calendar_data_source: str
+    calendar_warnings: list[str]
     result: dict[str, Any]
 
 
@@ -74,23 +80,37 @@ class CalendarBureau:
                     ("user", "Daily plan: {daily_plan}\nResearch notes: {research_notes}\nReturn a structured object with an events list."),
                 ])
                 event_list = await (prompt | structured).ainvoke({"daily_plan": str(state.get("daily_plan", [])), "research_notes": state.get("research_notes", "")})
-                return {"events": [item.model_dump(mode="json") for item in event_list.events]}
-            except Exception:
-                pass
+                return {"events": [item.model_dump(mode="json") for item in event_list.events], "calendar_status": "ok", "calendar_data_source": "structured_llm", "calendar_warnings": []}
+            except Exception as exc:
+                logger.warning("Calendar structured synthesis failed; using fallback events: %s", exc)
+                failure_warning = f"Calendar structured synthesis failed: {exc}"
+        else:
+            failure_warning = "Calendar structured synthesis unavailable; using itinerary-derived fallback events."
         events: list[dict[str, Any]] = []
+        warnings: list[str] = [failure_warning]
         for day in state.get("daily_plan", []):
             for activity in day.get("activities", []):
-                events.append(CalendarEventModel(title=activity.get("title", "Activity"), start_at=self._combine_datetime(day.get("date"), activity.get("start_time", "09:00")), end_at=self._combine_datetime(day.get("date"), activity.get("end_time", "10:00")), location=activity.get("location_name", ""), description=activity.get("description", ""), url=activity.get("booking_link") or activity.get("map_link")).model_dump(mode="json"))
-        return {"events": events}
+                try:
+                    events.append(CalendarEventModel(title=activity.get("title", "Activity"), start_at=self._combine_datetime(day.get("date"), activity.get("start_time", "09:00")), end_at=self._combine_datetime(day.get("date"), activity.get("end_time", "10:00")), location=activity.get("location_name", ""), description=activity.get("description", ""), url=activity.get("booking_link") or activity.get("map_link")).model_dump(mode="json"))
+                except ValueError as exc:
+                    warnings.append(str(exc))
+        status = "error" if any("missing itinerary date" in item.lower() for item in warnings) else "fallback"
+        data_source = "unavailable" if status == "error" else "fallback_estimate"
+        return {"events": events if status != "error" else [], "calendar_status": status, "calendar_data_source": data_source, "calendar_warnings": warnings}
 
     async def write_calendar(self, state: CalendarState) -> dict[str, Any]:
         payload = state["payload"]
         output_path = self.output_dir / f"{sanitize_request_id(payload.get('request_id', 'trip'))}_trip_calendar.ics"
         events = [CalendarEventModel.model_validate(item) for item in state.get("events", [])]
-        build_ics_calendar(f"{state['destination']} Travel Plan", events, output_path)
-        return {"result": CalendarExecutionResult(calendar_file=output_path, events_created=len(events), calendar_name=f"{state['destination']} Travel Plan").model_dump(mode="json")}
+        status = state.get("calendar_status") or ("fallback" if events else "error")
+        data_source = state.get("calendar_data_source") or ("fallback_estimate" if events else "unavailable")
+        warnings = list(state.get("calendar_warnings") or [])
+        build_ics_calendar(f"{state['destination']} Travel Plan", events, output_path, data_source=data_source, status=status, warnings=warnings)
+        return {"result": CalendarExecutionResult(calendar_file=output_path, events_created=len(events), calendar_name=f"{state['destination']} Travel Plan", status=status, data_source=data_source, warnings=warnings).model_dump(mode="json")}
 
     def _combine_datetime(self, day: str | None, clock: str) -> datetime:
-        day_value = datetime.fromisoformat(f"{day}T00:00:00") if day else datetime.now(timezone.utc).replace(tzinfo=None)
+        if not day:
+            raise ValueError("Missing itinerary date for calendar event; refusing to use current time.")
+        day_value = datetime.fromisoformat(f"{day}T00:00:00").replace(tzinfo=timezone.utc)
         hour, minute = [int(part) for part in clock.split(":", 1)]
         return day_value.replace(hour=hour, minute=minute)

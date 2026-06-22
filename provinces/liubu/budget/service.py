@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from math import ceil
 from typing import Any, TypedDict
@@ -10,6 +11,8 @@ from langgraph.graph import END, StateGraph
 from utils.agent_runtime import run_react_mcp_task, soul_path_for
 from utils.schemas import BudgetExecutionResult
 from utils.llm_factory import build_qwen_chat
+
+logger = logging.getLogger(__name__)
 
 
 class BudgetState(TypedDict, total=False):
@@ -71,9 +74,14 @@ class BudgetBureau:
                     ("user", "Draft: {draft}\nProfile: {profile}\nResearch notes: {research_notes}\nReturn a structured budget output."),
                 ])
                 result = await (prompt | structured).ainvoke({"draft": str(state.get("draft", {})), "profile": str(state.get("profile", {})), "research_notes": state.get("research_notes", "")})
-                return {"result": result.model_dump(mode="json")}
-            except Exception:
-                pass
+                data = result.model_dump(mode="json")
+                data.update({"status": "ok", "data_source": "structured_llm"})
+                return {"result": data}
+            except Exception as exc:
+                logger.warning("Budget structured synthesis failed; using fallback result: %s", exc)
+                failure_warning = f"Budget structured synthesis failed: {exc}"
+        else:
+            failure_warning = "Budget structured synthesis unavailable; using fallback estimate."
         profile = state.get("profile", {})
         draft = state.get("draft", {})
         currency = profile.get("currency", "USD")
@@ -101,7 +109,7 @@ class BudgetBureau:
             {"category": "misc", "item": "Buffer and incidentals", "estimated_cost": round(max(subtotal * 0.15, 50), 2), "currency": currency, "notes": state.get("research_notes", "Fallback budget synthesis.")},
         ]
         total = round(sum(item["estimated_cost"] for item in line_items), 2)
-        warnings = ["Budget output fell back because MCP or structured synthesis failed.", "Estimated fallback; did not use real-time data."]
+        warnings = ["Budget output fell back because MCP or structured synthesis failed.", "Estimated fallback; did not use real-time data.", failure_warning]
         if total_budget is not None and total > float(total_budget):
             warnings.append("Estimated trip cost exceeds the declared budget cap.")
         return {"result": BudgetExecutionResult(currency=currency, budget_breakdown=line_items, total_estimated_cost=total, warnings=warnings).model_dump(mode="json")}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, TypedDict
 from urllib.parse import quote_plus
@@ -10,6 +11,8 @@ from langgraph.graph import END, StateGraph
 from utils.agent_runtime import run_react_mcp_task, soul_path_for
 from utils.schemas import AccommodationExecutionResult
 from utils.llm_factory import build_qwen_chat
+
+logger = logging.getLogger(__name__)
 
 
 class AccommodationState(TypedDict, total=False):
@@ -75,9 +78,14 @@ class AccommodationBureau:
                     ("user", "Destination: {destination}\nProfile: {profile}\nResearch notes: {research_notes}\nReturn a structured accommodation output."),
                 ])
                 result = await (prompt | structured).ainvoke({"destination": state["destination"], "profile": str(state.get("profile", {})), "research_notes": state.get("research_notes", "")})
-                return {"result": result.model_dump(mode="json")}
-            except Exception:
-                pass
+                data = result.model_dump(mode="json")
+                data.update({"status": "ok", "data_source": "structured_llm"})
+                return {"result": data}
+            except Exception as exc:
+                logger.warning("Accommodation structured synthesis failed; using fallback result: %s", exc)
+                failure_note = f"Accommodation structured synthesis failed: {exc}"
+        else:
+            failure_note = "Accommodation structured synthesis unavailable; using fallback estimate."
         destination = state["destination"]
         currency = state.get("profile", {}).get("currency", "USD")
         zones = ["Central Station Area", "Old Town Core", "Museum Quarter"]
@@ -89,4 +97,4 @@ class AccommodationBureau:
             query = quote_plus(f"{destination} {zone} hotel")
             nightly_rate = 120 + index * 20
             hotels.append({"name": f"{destination} {zone} Hotel {index}", "nightly_rate": nightly_rate, "total_rate": nightly_rate * nights, "currency": currency, "rating": 4.0 + (index * 0.2), "booking_link": f"https://www.booking.com/searchresults.html?ss={query}", "address": f"{zone}, {destination}", "notes": f"{fallback_note} {research_note}"})
-        return {"result": AccommodationExecutionResult(destination=destination, hotel_options=hotels, booking_links=[item["booking_link"] for item in hotels], search_notes=[fallback_note, research_note]).model_dump(mode="json")}
+        return {"result": AccommodationExecutionResult(destination=destination, hotel_options=hotels, booking_links=[item["booking_link"] for item in hotels], search_notes=[fallback_note, research_note, failure_note], warnings=[failure_note]).model_dump(mode="json")}

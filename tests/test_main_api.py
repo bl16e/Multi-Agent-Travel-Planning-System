@@ -105,6 +105,36 @@ def test_download_artifact_rejects_unsafe_request_id_alias(tmp_path, monkeypatch
     assert response.status_code == 404
 
 
+def test_download_markdown_artifact_preserves_data_source_labels(tmp_path, monkeypatch):
+    artifact = tmp_path / "labeled_trip_travel_plan.md"
+    artifact.write_text("# Trip\n\n## Data Sources\n- WEATHER: fallback / fallback_estimate", encoding="utf-8")
+    monkeypatch.setattr(main, "DEFAULT_ARTIFACT_DIR", Path(tmp_path))
+
+    client = TestClient(main.app)
+    response = client.get("/download/labeled_trip")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/markdown")
+    assert "## Data Sources" in response.text
+    assert "fallback_estimate" in response.text
+
+
+def test_download_calendar_artifact_preserves_data_source_labels(tmp_path, monkeypatch):
+    artifact = tmp_path / "calendar_labeled_trip_trip_calendar.ics"
+    artifact.write_text(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nX-MA-DATA-SOURCE:fallback_estimate\r\nEND:VCALENDAR\r\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "DEFAULT_ARTIFACT_DIR", Path(tmp_path))
+
+    client = TestClient(main.app)
+    response = client.get("/download/calendar_labeled_trip")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/calendar")
+    assert "X-MA-DATA-SOURCE:fallback_estimate" in response.text
+
+
 def test_plan_stream_emits_progress_result_and_done(monkeypatch):
     class StreamingFakeSystem:
         def __init__(self, artifact_dir=None, progress_reporter=None):
