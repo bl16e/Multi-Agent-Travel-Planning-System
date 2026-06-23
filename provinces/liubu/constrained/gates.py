@@ -56,7 +56,9 @@ def _shared_findings(worker_input: LiubuWorkerInput, result: dict[str, Any], evi
     if result.get("status") in {"fallback", "error"} and result.get("data_source") not in {"fallback_estimate", "unavailable"}:
         findings.append(_finding("error", "fallback_source_invalid", "Fallback or error result must use fallback_estimate or unavailable data_source."))
     for index, item in enumerate(evidence):
-        if item.status in {"blocked", "error", "timeout", "missing"}:
+        if item.status == "blocked":
+            findings.append(_finding("error", "blocked_tool_call", item.error or f"{item.tool_name} was blocked by Liubu constraints.", evidence_index=index))
+        elif item.status in {"error", "timeout", "missing"}:
             findings.append(_finding("warning", f"{item.status}_tool_call", item.error or f"{item.tool_name} returned {item.status}.", evidence_index=index))
     return findings
 

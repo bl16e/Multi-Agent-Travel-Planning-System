@@ -493,3 +493,45 @@ async def test_flight_transport_blocks_agent_tool_call_with_wrong_trip_facts(mon
     assert any("departure_id must match PEK" in note for note in result["transport_notes"])
     assert result["liubu_quality"]["passed"] is False
     assert result["liubu_evidence"][0]["status"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_accommodation_blocks_agent_hotel_search_with_past_dates(monkeypatch):
+    class FakeAgent:
+        async def ainvoke(self, state):
+            return {
+                "tool_requests": [
+                    {
+                        "tool": "google_hotels",
+                        "args": {
+                            "q": "Tokyo hotels",
+                            "check_in_date": "2023-10-01",
+                            "check_out_date": "2023-10-02",
+                            "adults": 1,
+                            "currency": "JPY",
+                        },
+                    }
+                ]
+            }
+
+    async def fake_tool_map(server_names, allowed_tool_names):
+        return {"google_hotels": object()}
+
+    monkeypatch.setattr(accommodation_service, "build_qwen_chat", lambda: None)
+    monkeypatch.setattr(accommodation_service, "load_allowed_tool_map", fake_tool_map)
+    bureau = AccommodationBureau()
+    bureau._agent_reasoning = FakeAgent().ainvoke
+    payload = {
+        "request_id": "hotel_wrong_args",
+        "approved_draft": {"destination": "Tokyo", "itinerary_draft": {"destination": "Tokyo", "daily_plan": [{"date": "2026-10-01", "activities": []}, {"date": "2026-10-02", "activities": []}]}},
+        "execution_plan": {"user_request": {"profile": {"start_date": "2026-10-01", "end_date": "2026-10-02", "adults": 2, "currency": "USD"}}},
+    }
+
+    result = await bureau.run(payload)
+
+    assert result["bureau"] == "ACCOMMODATION"
+    assert result["status"] == "fallback"
+    assert result["data_source"] == "fallback_estimate"
+    assert any("check_in_date must match 2026-10-01" in warning for warning in result["warnings"])
+    assert result["liubu_quality"]["passed"] is False
+    assert result["liubu_evidence"][0]["status"] == "blocked"
