@@ -284,6 +284,8 @@ class AccommodationExecutionResult(BaseModel):
     booking_links: list[HttpUrl | str] = Field(default_factory=list)
     search_notes: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    liubu_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    liubu_quality: dict[str, Any] = Field(default_factory=dict)
 
 
 class FlightOptionModel(BaseModel):
@@ -308,6 +310,8 @@ class FlightTransportExecutionResult(BaseModel):
     flight_options: list[FlightOptionModel] = Field(default_factory=list)
     transport_notes: list[str] = Field(default_factory=list)
     booking_links: list[HttpUrl | str] = Field(default_factory=list)
+    liubu_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    liubu_quality: dict[str, Any] = Field(default_factory=dict)
 
 
 class FinalTravelPackageModel(BaseModel):
