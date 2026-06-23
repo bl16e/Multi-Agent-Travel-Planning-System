@@ -40,3 +40,27 @@ def test_resolve_liubu_targets_deduplicates_preserving_order():
     )
 
     assert targets == [AgentRole.WEATHER, AgentRole.BUDGET, AgentRole.CALENDAR]
+
+
+def test_register_execution_result_records_liubu_quality_metadata():
+    orchestrator = ShangshuOrchestrator()
+    context = orchestrator.bootstrap("quality_meta", {"request_id": "quality_meta"})
+
+    orchestrator.register_execution_result(
+        context,
+        AgentRole.FLIGHT_TRANSPORT,
+        {
+            "bureau": "FLIGHT_TRANSPORT",
+            "status": "fallback",
+            "data_source": "fallback_estimate",
+            "liubu_quality": {
+                "passed": False,
+                "findings": [{"severity": "error", "code": "wrong_departure_date", "message": "date mismatch"}],
+            },
+        },
+    )
+
+    assert context.execution_results["FLIGHT_TRANSPORT"]["liubu_quality"]["passed"] is False
+    assert context.quality_gate_results["FLIGHT_TRANSPORT"]["passed"] is False
+    assert context.progress_events[-1]["stage"] == "execution_quality_gate"
+    assert "wrong_departure_date" in context.progress_events[-1]["message"]

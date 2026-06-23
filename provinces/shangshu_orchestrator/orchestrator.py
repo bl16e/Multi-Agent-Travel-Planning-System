@@ -38,6 +38,7 @@ class ShangshuWorkflowContext:
     draft_payload: dict[str, Any] | None = None
     review_payload: dict[str, Any] | None = None
     execution_results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    quality_gate_results: dict[str, dict[str, Any]] = field(default_factory=dict)
     progress_events: list[dict[str, Any]] = field(default_factory=list)
     pending_user_inputs: list[str] = field(default_factory=list)
     assembled_output: dict[str, Any] | None = None
@@ -175,6 +176,16 @@ class ShangshuOrchestrator:
         enforce_permission(role, ActionType.RETURN_EXECUTION_RESULT, AgentRole.SHANGSHU)
         context.execution_results[role.value] = result_payload
         self._record_progress(context, stage="execution_result", message=f"{role.value} execution result received.", actor=role)
+        quality = result_payload.get("liubu_quality")
+        if isinstance(quality, dict):
+            context.quality_gate_results[role.value] = quality
+            finding_codes = [str(item.get("code")) for item in quality.get("findings") or [] if isinstance(item, dict) and item.get("code")]
+            self._record_progress(
+                context,
+                stage="execution_quality_gate",
+                message=f"{role.value} quality passed={bool(quality.get('passed'))}; findings={','.join(finding_codes)}",
+                actor=role,
+            )
 
     def assemble_outputs(self, context: ShangshuWorkflowContext) -> dict[str, Any]:
         self._transition(context, WorkflowState.ASSEMBLE, actor=AgentRole.SHANGSHU, reason="All required Liubu responses received; assembling final outputs.")
