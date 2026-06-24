@@ -455,28 +455,44 @@ async def test_liubu_bureaus_can_fill_current_review_requirements_without_live_l
 
 @pytest.mark.asyncio
 async def test_flight_transport_blocks_agent_tool_call_with_wrong_trip_facts(monkeypatch):
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import tool
+    from provinces.liubu.constrained.tool_node import wrap_constrained_tools
+
     class FakeAgent:
         async def ainvoke(self, state):
             return {
-                "tool_requests": [
-                    {
-                        "tool": "google_flights",
-                        "args": {
-                            "departure_id": "SHA",
-                            "arrival_id": "NRT",
-                            "outbound_date": "2023-10-01",
-                            "adults": 1,
-                            "currency": "JPY",
-                        },
-                    }
+                "messages": [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "google_flights",
+                                "args": {
+                                    "departure_id": "SHA",
+                                    "arrival_id": "NRT",
+                                    "outbound_date": "2023-10-01",
+                                    "adults": 1,
+                                    "currency": "JPY",
+                                },
+                                "id": "bad_flight_call",
+                                "type": "tool_call",
+                            }
+                        ],
+                    )
                 ]
             }
 
-    async def fake_tool_map(server_names, allowed_tool_names):
-        return {"google_flights": object()}
+    @tool
+    async def google_flights(departure_id: str, arrival_id: str, outbound_date: str, adults: int, currency: str):
+        """Search flights."""
+        return {"route": f"{departure_id}-{arrival_id}"}
+
+    async def fake_constrained_tools(worker_input, server_names, allowed_tool_names):
+        return wrap_constrained_tools(worker_input, [google_flights], allowed_tool_names)
 
     monkeypatch.setattr(flight_service, "build_qwen_chat", lambda: None)
-    monkeypatch.setattr(flight_service, "load_allowed_tool_map", fake_tool_map)
+    monkeypatch.setattr(flight_service, "load_constrained_mcp_tools", fake_constrained_tools)
     bureau = FlightTransportBureau()
     bureau._agent_reasoning = FakeAgent().ainvoke
     payload = {
@@ -497,28 +513,44 @@ async def test_flight_transport_blocks_agent_tool_call_with_wrong_trip_facts(mon
 
 @pytest.mark.asyncio
 async def test_accommodation_blocks_agent_hotel_search_with_past_dates(monkeypatch):
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import tool
+    from provinces.liubu.constrained.tool_node import wrap_constrained_tools
+
     class FakeAgent:
         async def ainvoke(self, state):
             return {
-                "tool_requests": [
-                    {
-                        "tool": "google_hotels",
-                        "args": {
-                            "q": "Tokyo hotels",
-                            "check_in_date": "2023-10-01",
-                            "check_out_date": "2023-10-02",
-                            "adults": 1,
-                            "currency": "JPY",
-                        },
-                    }
+                "messages": [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "google_hotels",
+                                "args": {
+                                    "q": "Tokyo hotels",
+                                    "check_in_date": "2023-10-01",
+                                    "check_out_date": "2023-10-02",
+                                    "adults": 1,
+                                    "currency": "JPY",
+                                },
+                                "id": "bad_hotel_call",
+                                "type": "tool_call",
+                            }
+                        ],
+                    )
                 ]
             }
 
-    async def fake_tool_map(server_names, allowed_tool_names):
-        return {"google_hotels": object()}
+    @tool
+    async def google_hotels(q: str, check_in_date: str, check_out_date: str, adults: int, currency: str):
+        """Search hotels."""
+        return {"query": q}
+
+    async def fake_constrained_tools(worker_input, server_names, allowed_tool_names):
+        return wrap_constrained_tools(worker_input, [google_hotels], allowed_tool_names)
 
     monkeypatch.setattr(accommodation_service, "build_qwen_chat", lambda: None)
-    monkeypatch.setattr(accommodation_service, "load_allowed_tool_map", fake_tool_map)
+    monkeypatch.setattr(accommodation_service, "load_constrained_mcp_tools", fake_constrained_tools)
     bureau = AccommodationBureau()
     bureau._agent_reasoning = FakeAgent().ainvoke
     payload = {

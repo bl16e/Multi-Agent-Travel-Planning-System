@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
+
+from langgraph.graph.message import add_messages
 
 from pydantic import BaseModel, Field
 
@@ -43,9 +45,10 @@ class LiubuValidationFinding(BaseModel):
 class LiubuWorkerState(TypedDict, total=False):
     payload: dict[str, Any]
     worker_input: LiubuWorkerInput
-    messages: list[Any]
+    messages: Annotated[list[Any], add_messages]
     tool_requests: list[dict[str, Any]]
     tool_evidence: list[dict[str, Any]]
+    tool_step_count: int
     validation_findings: list[dict[str, Any]]
     result: dict[str, Any]
     status: str
