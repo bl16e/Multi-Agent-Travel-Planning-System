@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,13 +9,15 @@ from typing import Any, TypedDict
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, StateGraph
 
-from utils.agent_runtime import run_react_mcp_task, soul_path_for
+from utils.agent_runtime import escape_prompt_template_text, run_react_mcp_task, soul_path_for
 from utils.icalendar_utils import build_ics_calendar
 from utils.path_safety import sanitize_request_id
 from utils.schemas import CalendarEventListModel, CalendarEventModel, CalendarExecutionResult
 from utils.llm_factory import build_qwen_chat
+from utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
+STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS: float | None = None
 
 
 class CalendarState(TypedDict, total=False):
@@ -76,11 +79,23 @@ class CalendarBureau:
             try:
                 structured = llm.with_structured_output(CalendarEventListModel)
                 prompt = ChatPromptTemplate.from_messages([
-                    ("system", Path(self.soul_path).read_text(encoding="utf-8")),
-                    ("user", "Daily plan: {daily_plan}\nResearch notes: {research_notes}\nReturn a structured object with an events list."),
+                    ("system", escape_prompt_template_text(Path(self.soul_path).read_text(encoding="utf-8"))),
+                    ("user", "Daily plan: {daily_plan}\nResearch notes: {research_notes}\nReturn valid JSON structured object with an events list."),
                 ])
-                event_list = await (prompt | structured).ainvoke({"daily_plan": str(state.get("daily_plan", [])), "research_notes": state.get("research_notes", "")})
-                return {"events": [item.model_dump(mode="json") for item in event_list.events], "calendar_status": "ok", "calendar_data_source": "structured_llm", "calendar_warnings": []}
+                event_list = await asyncio.wait_for(
+                    (prompt | structured).ainvoke({"daily_plan": str(state.get("daily_plan", [])), "research_notes": state.get("research_notes", "")}),
+                    timeout=STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS or get_settings().qwen_timeout_seconds,
+                )
+                events = [item.model_dump(mode="json") for item in event_list.events]
+                expected_events = sum(len(day.get("activities", [])) for day in state.get("daily_plan", []))
+                if len(events) >= expected_events:
+                    return {"events": events, "calendar_status": "ok", "calendar_data_source": "structured_llm", "calendar_warnings": []}
+                raise ValueError(
+                    f"Calendar structured synthesis returned {len(events)} events for {expected_events} itinerary activities."
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Calendar structured synthesis timed out; using fallback events.")
+                failure_warning = "Calendar structured synthesis timed out."
             except Exception as exc:
                 logger.warning("Calendar structured synthesis failed; using fallback events: %s", exc)
                 failure_warning = f"Calendar structured synthesis failed: {exc}"

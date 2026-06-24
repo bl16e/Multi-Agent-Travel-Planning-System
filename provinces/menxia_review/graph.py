@@ -90,31 +90,35 @@ class MenxiaReviewAgent:
                     warnings=["Generic placeholder itinerary content was rejected before final package approval."],
                 )
             else:
-                try:
-                    verdict = await run_structured_synthesis(
-                        soul_path=self.soul_path,
-                        output_model=ReviewVerdictModel,
-                        user_prompt=(
-                            "审核中书省提交的行程草案，返回结构化审核结果。\n"
-                            "草案内容: {draft}\n"
-                            "用户需求: {user_request}\n\n"
-                            "审核标准：\n"
-                            "- 是否包含具体景点名称（非泛指区域）\n"
-                            "- 是否有真实预订链接\n"
-                            "- 是否有交通细节和时长\n"
-                            "- 是否有天气应急方案\n\n"
-                            "重要：你只能返回 APPROVED（通过）或 REJECTED（拒绝）。\n"
-                            "不要返回 HUMAN_INTERVENE，预订确认、餐厅预约等执行细节不需要用户介入。\n"
-                            "如果草案质量不足，使用 REJECTED 并在 revision_requests 中说明需要修改的内容。"
-                        ),
-                        variables={
-                            "draft": str(packet.model_dump(mode="json")),
-                            "user_request": str(state.get("user_request", {})),
-                        },
-                        timeout_seconds=200.0,
-                    )
-                except Exception:
-                    verdict = self._offline_verdict(packet)
+                dispatchable_live_verdict = self._dispatchable_live_research_verdict(packet)
+                if dispatchable_live_verdict is not None:
+                    verdict = dispatchable_live_verdict
+                else:
+                    try:
+                        verdict = await run_structured_synthesis(
+                            soul_path=self.soul_path,
+                            output_model=ReviewVerdictModel,
+                            user_prompt=(
+                                "审核中书省提交的行程草案，返回结构化审核结果。\n"
+                                "草案内容: {draft}\n"
+                                "用户需求: {user_request}\n\n"
+                                "审核标准：\n"
+                                "- 是否包含具体景点名称（非泛指区域）\n"
+                                "- 是否有真实预订链接\n"
+                                "- 是否有交通细节和时长\n"
+                                "- 是否有天气应急方案\n\n"
+                                "重要：你只能返回 APPROVED（通过）或 REJECTED（拒绝）。\n"
+                                "不要返回 HUMAN_INTERVENE，预订确认、餐厅预约等执行细节不需要用户介入。\n"
+                                "如果草案质量不足，使用 REJECTED 并在 revision_requests 中说明需要修改的内容。"
+                            ),
+                            variables={
+                                "draft": str(packet.model_dump(mode="json")),
+                                "user_request": str(state.get("user_request", {})),
+                            },
+                            timeout_seconds=200.0,
+                        )
+                    except Exception:
+                        verdict = self._offline_verdict(packet)
             # Guard: AI should not return HUMAN_INTERVENE; downgrade to REJECTED
             if verdict.verdict == "HUMAN_INTERVENE":
                 verdict = ReviewVerdictModel(
@@ -186,6 +190,52 @@ class MenxiaReviewAgent:
             data_source="fallback_estimate",
             warnings=["Offline structural review only; verify live availability before booking."],
         )
+
+    def _dispatchable_live_research_verdict(self, packet: ZhongshuDraftPacketModel) -> ReviewVerdictModel | None:
+        draft = packet.itinerary_draft
+        if not self._is_live_research_fallback(draft.model_dump(mode="json")):
+            return None
+        if not draft.daily_plan or any(not day.activities for day in draft.daily_plan):
+            return None
+
+        missing_named_details: list[str] = []
+        for day in draft.daily_plan:
+            for activity in day.activities:
+                if not activity.title.strip() or not activity.location_name.strip():
+                    missing_named_details.append(f"Day {day.day_index} has an activity without a concrete title or location.")
+                if not activity.map_link:
+                    missing_named_details.append(f"Day {day.day_index} activity '{activity.title}' lacks a map link.")
+        if missing_named_details:
+            return ReviewVerdictModel(
+                verdict="REJECTED",
+                summary="Live MCP research draft is not dispatchable because concrete place details are missing.",
+                blocking_issues=missing_named_details,
+                revision_requests=["Add concrete activity titles, locations, and map links before Liubu dispatch."],
+                approved_bureaus=[],
+                review_notes=["Deterministic live MCP dispatchability guard ran before LLM review."],
+                data_source="live",
+                warnings=["Live MCP draft could not be dispatched to Liubu because named place details were incomplete."],
+            )
+
+        return ReviewVerdictModel(
+            verdict="APPROVED",
+            summary="Live MCP research draft is dispatchable; pending booking, transport, weather, budget, and calendar details are assigned to Liubu execution.",
+            approved_bureaus=list(packet.required_bureaus),
+            review_notes=[
+                "Liubu will complete pending execution details instead of treating them as Menxia blocking issues.",
+                "Deterministic live MCP dispatchability guard ran before LLM review.",
+            ],
+            data_source="live",
+            warnings=[
+                "Draft still has pending execution confirmations; Liubu must verify booking availability, transport duration, weather contingency, budget, and calendar output.",
+            ],
+        )
+
+    def _is_live_research_fallback(self, draft: dict[str, Any]) -> bool:
+        if str(draft.get("trip_style") or "") == "live_research_fallback":
+            return True
+        notes = " ".join(str(item) for item in draft.get("planning_notes", []))
+        return "data_source=live_mcp_research" in notes
 
     def _placeholder_issues(self, packet: ZhongshuDraftPacketModel) -> list[str]:
         issues: list[str] = []

@@ -6,9 +6,9 @@ from pathlib import Path
 import httpx
 from fastmcp import FastMCP
 
-PROJECT_PARENT = Path(__file__).resolve().parents[2]
-if str(PROJECT_PARENT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_PARENT))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.settings import get_settings
 
@@ -22,7 +22,19 @@ async def _search(params: dict[str, str]) -> dict:
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get("https://serpapi.com/search", params=params)
-        response.raise_for_status()
+        if response.status_code >= 400:
+            error = response.text
+            try:
+                payload = response.json()
+                if isinstance(payload, dict):
+                    error = str(payload.get("error") or payload.get("message") or error)
+            except ValueError:
+                pass
+            return {
+                "status": "error",
+                "http_status": response.status_code,
+                "error": error.replace(str(settings.serpapi_api_key), "<redacted>"),
+            }
         return response.json()
 
 

@@ -1,6 +1,7 @@
 import pytest
 import utils.agent_runtime as agent_runtime
 from provinces.zhongshu_itinerary.graph import ZhongshuItineraryAgent
+from utils.schemas import ItineraryDraftModel
 
 
 @pytest.mark.asyncio
@@ -51,7 +52,7 @@ async def test_draft_itinerary_offline_output_uses_request_destination(monkeypat
         return agent_runtime.FALLBACK_MESSAGE
 
     monkeypatch.setattr(agent_runtime, "build_qwen_chat", lambda: None)
-    monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_react_mcp_task", fake_research)
+    monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_direct_mcp_tool_calls", fake_research)
 
     agent = ZhongshuItineraryAgent()
     result = await agent.draft_itinerary(
@@ -80,6 +81,202 @@ async def test_draft_itinerary_offline_output_uses_request_destination(monkeypat
     assert draft["daily_plan"][0]["city"] == "Kyoto"
     assert "Kyoto" in draft["daily_plan"][0]["activities"][0]["title"]
     assert "Tokyo" not in str(draft)
+
+
+@pytest.mark.asyncio
+async def test_draft_itinerary_uses_direct_place_tool_calls(monkeypatch):
+    seen = {}
+
+    async def fake_direct_research(**kwargs):
+        seen["server_names"] = kwargs.get("server_names")
+        seen["tool_calls"] = kwargs.get("tool_calls")
+        return "Senso-ji Temple; Tokyo National Museum; Tsukiji Outer Market; Shinjuku Gyoen."
+
+    async def fake_synthesis(**kwargs):
+        return ItineraryDraftModel.model_validate(
+            {
+                "destination": "Tokyo",
+                "overview": "Concrete Tokyo plan.",
+                "trip_style": "structured",
+                "daily_plan": [
+                    {
+                        "day_index": 1,
+                        "date": "2026-05-01",
+                        "city": "Tokyo",
+                        "theme": "Culture",
+                        "summary": "Named Tokyo places.",
+                        "activities": [
+                            {
+                                "start_time": "09:00",
+                                "end_time": "10:30",
+                                "title": "Senso-ji Temple",
+                                "location_name": "Senso-ji Temple, Asakusa",
+                                "description": "Visit the temple.",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_direct_mcp_tool_calls", fake_direct_research)
+    monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_structured_synthesis", fake_synthesis)
+
+    agent = ZhongshuItineraryAgent()
+    await agent.draft_itinerary(
+        {
+            "request_id": "tool_limit",
+            "normalized_request": {
+                "destination": "Tokyo",
+                "origin_city": "Beijing",
+                "start_date": "2026-05-01",
+                "end_date": "2026-05-01",
+                "total_budget": 1800,
+                "currency": "USD",
+                "adults": 1,
+                "children": 0,
+                "interests": ["culture", "food"],
+                "constraints": ["include official links"],
+                "user_message": "Use named places and transport durations.",
+                "revision_round": 0,
+                "rejection_reasons": [],
+                "revision_requests": [],
+            },
+        }
+    )
+
+    assert seen["server_names"] == ["serpapi"]
+    assert {call["tool"] for call in seen["tool_calls"]} <= {"search_google_maps", "search_local_places"}
+    assert any(call["tool"] == "search_local_places" for call in seen["tool_calls"])
+
+
+@pytest.mark.asyncio
+async def test_draft_itinerary_does_not_hardcode_structured_synthesis_timeout(monkeypatch):
+    seen = {}
+
+    async def fake_direct_research(**kwargs):
+        return "Senso-ji Temple; Tokyo National Museum."
+
+    async def fake_synthesis(**kwargs):
+        seen["timeout_seconds"] = kwargs.get("timeout_seconds")
+        return ItineraryDraftModel.model_validate(
+            {
+                "destination": "Tokyo",
+                "overview": "Concrete Tokyo plan.",
+                "trip_style": "structured",
+                "daily_plan": [
+                    {
+                        "day_index": 1,
+                        "date": "2026-05-01",
+                        "city": "Tokyo",
+                        "theme": "Culture",
+                        "summary": "Named Tokyo places.",
+                        "activities": [
+                            {
+                                "start_time": "09:00",
+                                "end_time": "10:30",
+                                "title": "Senso-ji Temple",
+                                "location_name": "Senso-ji Temple, Asakusa",
+                                "description": "Visit the temple.",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_direct_mcp_tool_calls", fake_direct_research)
+    monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_structured_synthesis", fake_synthesis)
+
+    agent = ZhongshuItineraryAgent()
+    await agent.draft_itinerary(
+        {
+            "request_id": "bounded_timeout",
+            "normalized_request": {
+                "destination": "Tokyo",
+                "origin_city": "Beijing",
+                "start_date": "2026-05-01",
+                "end_date": "2026-05-01",
+                "total_budget": 1800,
+                "currency": "USD",
+                "adults": 1,
+                "children": 0,
+                "interests": ["culture"],
+                "constraints": [],
+                "user_message": "Use named places.",
+                "revision_round": 0,
+                "rejection_reasons": [],
+                "revision_requests": [],
+            },
+        }
+    )
+
+    assert seen["timeout_seconds"] is None
+
+
+@pytest.mark.asyncio
+async def test_draft_itinerary_passes_readable_chinese_prompt_to_synthesis(monkeypatch):
+    seen = {}
+
+    async def fake_direct_research(**kwargs):
+        return "Senso-ji Temple; Tokyo National Museum."
+
+    async def fake_synthesis(**kwargs):
+        seen["user_prompt"] = kwargs.get("user_prompt")
+        return ItineraryDraftModel.model_validate(
+            {
+                "destination": "Tokyo",
+                "overview": "Concrete Tokyo plan.",
+                "trip_style": "structured",
+                "daily_plan": [
+                    {
+                        "day_index": 1,
+                        "date": "2026-05-01",
+                        "city": "Tokyo",
+                        "theme": "Culture",
+                        "summary": "Named Tokyo places.",
+                        "activities": [
+                            {
+                                "start_time": "09:00",
+                                "end_time": "10:30",
+                                "title": "Senso-ji Temple",
+                                "location_name": "Senso-ji Temple, Asakusa",
+                                "description": "Visit the temple.",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_direct_mcp_tool_calls", fake_direct_research)
+    monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_structured_synthesis", fake_synthesis)
+
+    agent = ZhongshuItineraryAgent()
+    await agent.draft_itinerary(
+        {
+            "request_id": "readable_prompt",
+            "normalized_request": {
+                "destination": "Tokyo",
+                "origin_city": "Beijing",
+                "start_date": "2026-05-01",
+                "end_date": "2026-05-01",
+                "total_budget": 1800,
+                "currency": "USD",
+                "adults": 1,
+                "children": 0,
+                "interests": ["culture"],
+                "constraints": [],
+                "user_message": "Use named places.",
+                "revision_round": 0,
+                "rejection_reasons": [],
+                "revision_requests": [],
+            },
+        }
+    )
+
+    assert "请根据用户需求生成详细的旅行行程草案" in seen["user_prompt"]
+    assert "璇锋" not in seen["user_prompt"]
 
 
 @pytest.mark.asyncio

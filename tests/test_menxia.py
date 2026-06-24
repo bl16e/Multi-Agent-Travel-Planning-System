@@ -117,7 +117,7 @@ async def test_offline_verdict_approves_only_requested_bureaus():
                             "date": "2026-05-01",
                             "city": "Tokyo",
                             "theme": "Arrival",
-                            "summary": "Arrival and orientation",
+                            "summary": "Arrival transfer followed by Senso-ji and Asakusa visit",
                             "activities": [
                                 {
                                     "start_time": "09:00",
@@ -167,7 +167,7 @@ async def test_verdict_falls_back_when_live_review_raises_non_runtime_error(monk
                             "date": "2026-05-01",
                             "city": "Tokyo",
                             "theme": "Arrival",
-                            "summary": "Arrival and orientation",
+                            "summary": "Arrival transfer followed by Senso-ji and Asakusa visit",
                             "activities": [
                                 {
                                     "start_time": "09:00",
@@ -246,3 +246,77 @@ async def test_verdict_rejects_generic_placeholder_itinerary_items():
     assert any("placeholder" in issue.lower() for issue in verdict["blocking_issues"])
     assert verdict["data_source"] == "fallback_estimate"
     assert any("generic" in warning.lower() for warning in verdict["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_verdict_approves_live_mcp_research_draft_for_liubu_completion(monkeypatch):
+    called = {"live_review": False}
+
+    async def fail_if_live_review_is_called(**kwargs):
+        called["live_review"] = True
+        raise AssertionError("Live MCP fallback drafts should be evaluated by deterministic dispatchability rules.")
+
+    monkeypatch.setattr("provinces.menxia_review.graph.run_structured_synthesis", fail_if_live_review_is_called)
+    agent = MenxiaReviewAgent()
+
+    result = await agent.verdict(
+        {
+            "request_id": "live_mcp_dispatchable",
+            "parsed_draft": {
+                "request_id": "live_mcp_dispatchable",
+                "destination": "Tokyo",
+                "itinerary_draft": {
+                    "destination": "Tokyo",
+                    "overview": "Live MCP research was used to build this draft; structured LLM synthesis was unavailable, so the plan remains pending review.",
+                    "trip_style": "live_research_fallback",
+                    "planning_notes": [
+                        "data_source=live_mcp_research; synthesis=fallback_from_compact_tool_results.",
+                        "Review all opening hours, reservation requirements, and transport durations before final approval.",
+                    ],
+                    "pending_confirmations": [
+                        "Confirm official opening hours and ticket availability for each listed place.",
+                        "Confirm transit duration and routing between daily activities.",
+                    ],
+                    "risk_flags": ["Live place search does not guarantee booking availability."],
+                    "daily_plan": [
+                        {
+                            "day_index": 1,
+                            "date": "2026-05-01",
+                            "city": "Tokyo",
+                            "theme": "Tokyo culture",
+                            "summary": "Uses live MCP place results for Tokyo; downstream bureaus must verify hours, bookings, weather, and transport.",
+                            "activities": [
+                                {
+                                    "start_time": "09:00",
+                                    "end_time": "11:00",
+                                    "title": "Senso-ji Temple",
+                                    "location_name": "2 Chome-3-1 Asakusa, Tokyo",
+                                    "description": "Live MCP place result for Buddhist temple. Verify opening hours and ticket availability before booking.",
+                                    "map_link": "https://www.google.com/maps/search/?api=1&query=Senso-ji+Temple",
+                                    "status": "pending",
+                                    "transport": {
+                                        "from_location": "hotel",
+                                        "to_location": "2 Chome-3-1 Asakusa, Tokyo",
+                                        "mode": "transit",
+                                        "duration_text": "Confirm live transit duration before final approval.",
+                                        "status": "pending",
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "required_bureaus": ["WEATHER", "BUDGET", "ACCOMMODATION", "FLIGHT_TRANSPORT", "CALENDAR"],
+                "bureau_tasks": [],
+                "governance": {"producer": "ZHONGSHU", "revision_round": 0},
+            },
+            "user_request": {"profile": {"total_budget": 1800, "currency": "USD"}},
+        }
+    )
+
+    verdict = result["verdict_payload"]
+    assert verdict["verdict"] == "APPROVED"
+    assert verdict["approved_bureaus"] == ["WEATHER", "BUDGET", "ACCOMMODATION", "FLIGHT_TRANSPORT", "CALENDAR"]
+    assert called["live_review"] is False
+    assert any("Liubu" in note for note in verdict["review_notes"])
+    assert any("pending" in warning.lower() for warning in verdict["warnings"])

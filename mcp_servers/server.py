@@ -27,7 +27,7 @@ def build_mcp_client(server_names: list[str] | None = None) -> MultiServerMCPCli
     if (not requested or "amap" in requested) and settings.amap_mcp_url:
         config["amap"] = {
             "url": settings.amap_mcp_url,
-            "transport": "http",
+            "transport": "streamable_http",
         }
 
     if not config:

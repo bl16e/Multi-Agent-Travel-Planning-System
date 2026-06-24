@@ -1,25 +1,120 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.prebuilt import create_react_agent
+from pydantic import BaseModel, Field
 
 from utils.llm_factory import build_qwen_chat
 from utils.mcp_client import load_mcp_tools
+from utils.schemas import DayPlanModel, ItineraryDraftModel
+from utils.settings import get_settings
 
 
 FALLBACK_MESSAGE = "MCP or LLM unavailable; falling back to heuristic synthesis."
 DEFAULT_TOOL_LOAD_TIMEOUT_SECONDS = 6.0
 DEFAULT_AGENT_INVOKE_TIMEOUT_SECONDS = 18.0
 DEFAULT_STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS = 20.0
+DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 15.0
+
+
+class ItineraryDraftStructuredOutput(BaseModel):
+    itinerary_draft: ItineraryDraftModel | list[DayPlanModel]
+    destination: str | None = None
+    overview: str | None = None
+    trip_style: str | None = None
+    daily_plan: list[Any] | None = None
+    planning_notes: list[str] = Field(default_factory=list)
+    pending_confirmations: list[str] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
 
 
 def load_soul_prompt(path: str | Path) -> str:
     return Path(path).read_text(encoding="utf-8")
+
+
+def escape_prompt_template_text(text: str) -> str:
+    return text.replace("{", "{{").replace("}", "}}")
+
+
+async def run_direct_mcp_tool_calls(
+    *,
+    server_names: list[str],
+    tool_calls: list[dict[str, Any]],
+    tool_load_timeout_seconds: float = DEFAULT_TOOL_LOAD_TIMEOUT_SECONDS,
+    tool_call_timeout_seconds: float = DEFAULT_TOOL_CALL_TIMEOUT_SECONDS,
+) -> str:
+    try:
+        tools = await asyncio.wait_for(load_mcp_tools(server_names), timeout=tool_load_timeout_seconds)
+    except asyncio.TimeoutError:
+        return f"{FALLBACK_MESSAGE} MCP tool loading timed out after {tool_load_timeout_seconds:.0f}s."
+    except Exception as exc:
+        return f"{FALLBACK_MESSAGE} MCP tool loading failed: {exc}"
+
+    tools_by_name = {getattr(tool, "name", ""): tool for tool in tools}
+    results: list[dict[str, Any]] = []
+    for call in tool_calls:
+        tool_name = str(call.get("tool") or "")
+        tool = tools_by_name.get(tool_name)
+        if tool is None:
+            results.append({"tool": tool_name, "status": "missing"})
+            continue
+        try:
+            result = await asyncio.wait_for(tool.ainvoke(call.get("args") or {}), timeout=tool_call_timeout_seconds)
+            results.append({"tool": tool_name, "status": "ok", "result": _compact_mcp_tool_result(result)})
+        except asyncio.TimeoutError:
+            results.append({"tool": tool_name, "status": "timeout"})
+        except Exception as exc:
+            results.append({"tool": tool_name, "status": "error", "error": str(exc)})
+
+    if not results:
+        return FALLBACK_MESSAGE
+    return json.dumps(results, ensure_ascii=False, default=str)
+
+
+def _compact_mcp_tool_result(result: Any) -> Any:
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except json.JSONDecodeError:
+            return result[:2000]
+    if not isinstance(result, dict):
+        return result
+
+    compact: dict[str, Any] = {}
+    for key in ("search_metadata", "search_parameters"):
+        value = result.get(key)
+        if isinstance(value, dict):
+            compact[key] = {item_key: value.get(item_key) for item_key in ("status", "engine", "location_used") if value.get(item_key)}
+
+    if isinstance(result.get("local_results"), list):
+        compact["local_results"] = [_compact_place_result(item) for item in result["local_results"][:8] if isinstance(item, dict)]
+    if isinstance(result.get("place_results"), dict):
+        compact["place_results"] = _compact_place_result(result["place_results"])
+    if isinstance(result.get("directions"), list):
+        compact["directions"] = result["directions"][:5]
+
+    return compact or {key: result.get(key) for key in ("title", "address", "type", "rating") if key in result}
+
+
+def _compact_place_result(item: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "title",
+        "type",
+        "address",
+        "rating",
+        "reviews",
+        "hours",
+        "website",
+        "link",
+        "gps_coordinates",
+    )
+    return {key: item.get(key) for key in fields if item.get(key) is not None}
 
 
 async def run_react_mcp_task(
@@ -27,8 +122,9 @@ async def run_react_mcp_task(
     soul_path: str | Path,
     server_names: list[str],
     user_task: str,
+    allowed_tool_names: list[str] | None = None,
     tool_load_timeout_seconds: float = DEFAULT_TOOL_LOAD_TIMEOUT_SECONDS,
-    invoke_timeout_seconds: float = DEFAULT_AGENT_INVOKE_TIMEOUT_SECONDS,
+    invoke_timeout_seconds: float | None = None,
 ) -> str:
     llm = build_qwen_chat()
     if llm is None:
@@ -41,14 +137,19 @@ async def run_react_mcp_task(
         return f"{FALLBACK_MESSAGE} MCP tool loading failed: {exc}"
     prompt = load_soul_prompt(soul_path)
 
+    if allowed_tool_names is not None:
+        allowed = set(allowed_tool_names)
+        tools = [tool for tool in tools if getattr(tool, "name", "") in allowed]
+
     if not tools:
         return FALLBACK_MESSAGE
 
+    effective_invoke_timeout = invoke_timeout_seconds or get_settings().qwen_timeout_seconds
     agent = create_react_agent(model=llm, tools=tools, prompt=prompt)
     try:
-        result = await asyncio.wait_for(agent.ainvoke({"messages": [("user", user_task)]}), timeout=invoke_timeout_seconds)
+        result = await asyncio.wait_for(agent.ainvoke({"messages": [("user", user_task)]}), timeout=effective_invoke_timeout)
     except asyncio.TimeoutError:
-        return f"{FALLBACK_MESSAGE} Agent execution timed out after {invoke_timeout_seconds:.0f}s."
+        return f"{FALLBACK_MESSAGE} Agent execution timed out after {effective_invoke_timeout:.0f}s."
     except Exception as exc:
         return f"{FALLBACK_MESSAGE} Agent tool execution failed: {exc}"
     messages = result.get("messages", [])
@@ -63,20 +164,23 @@ async def run_structured_synthesis(
     output_model: Any,
     user_prompt: str,
     variables: dict[str, Any],
-    timeout_seconds: float = DEFAULT_STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
 ) -> Any:
     llm = build_qwen_chat()
     if llm is None:
         return _offline_structured_output(output_model, variables)
     try:
-        structured = llm.with_structured_output(output_model)
+        structured_model = _structured_output_model(output_model)
+        structured = llm.with_structured_output(structured_model)
         prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", load_soul_prompt(soul_path)),
-                ("user", user_prompt),
+                ("system", escape_prompt_template_text(load_soul_prompt(soul_path))),
+                ("user", f"{user_prompt}\n\nReturn valid JSON only, matching the requested structured schema."),
             ]
         )
-        return await asyncio.wait_for((prompt | structured).ainvoke(variables), timeout=timeout_seconds)
+        effective_timeout = timeout_seconds or get_settings().qwen_timeout_seconds
+        result = await asyncio.wait_for((prompt | structured).ainvoke(variables), timeout=effective_timeout)
+        return _normalize_structured_output(output_model, result, variables)
     except Exception as exc:
         try:
             return _offline_structured_output(output_model, {**variables, "fallback_reason": str(exc)})
@@ -86,6 +190,42 @@ async def run_structured_synthesis(
 
 def soul_path_for(file_path: str | Path) -> Path:
     return Path(file_path).with_name("SOUL.md")
+
+
+def _structured_output_model(output_model: Any) -> Any:
+    if getattr(output_model, "__name__", "") == "ItineraryDraftModel":
+        return ItineraryDraftStructuredOutput
+    return output_model
+
+
+def _normalize_structured_output(output_model: Any, result: Any, variables: dict[str, Any]) -> Any:
+    if isinstance(result, output_model):
+        return result
+    if getattr(output_model, "__name__", "") != "ItineraryDraftModel":
+        return result
+
+    data = result.model_dump(mode="json") if isinstance(result, BaseModel) else dict(result)
+    wrapped = data.get("itinerary_draft")
+    if isinstance(wrapped, dict):
+        candidate = dict(wrapped)
+    elif isinstance(wrapped, list):
+        candidate = {"daily_plan": wrapped}
+    else:
+        candidate = data
+
+    if not candidate.get("destination"):
+        candidate["destination"] = str(variables.get("destination") or "Destination")
+    if not candidate.get("overview"):
+        candidate["overview"] = data.get("overview") or "Structured itinerary generated from live research."
+    if not candidate.get("trip_style"):
+        candidate["trip_style"] = data.get("trip_style") or "structured"
+    if not candidate.get("planning_notes"):
+        candidate["planning_notes"] = data.get("planning_notes") or []
+    if not candidate.get("pending_confirmations"):
+        candidate["pending_confirmations"] = data.get("pending_confirmations") or []
+    if not candidate.get("risk_flags"):
+        candidate["risk_flags"] = data.get("risk_flags") or []
+    return output_model.model_validate(candidate)
 
 
 def _offline_structured_output(output_model: Any, variables: dict[str, Any]) -> Any:
@@ -103,6 +243,9 @@ def _offline_itinerary_draft(output_model: Any, variables: dict[str, Any]) -> An
     interests = [item.strip() for item in str(variables.get("interests") or "sightseeing").split(",") if item.strip()]
     if not interests:
         interests = ["sightseeing"]
+    live_places = _extract_live_places(variables.get("research_context"))
+    if live_places:
+        return _live_research_itinerary_draft(output_model, variables, destination, start, day_count, interests, live_places)
 
     daily_plan = []
     for index in range(day_count):
@@ -162,6 +305,119 @@ def _offline_itinerary_draft(output_model: Any, variables: dict[str, Any]) -> An
             ],
         }
     )
+
+
+def _live_research_itinerary_draft(
+    output_model: Any,
+    variables: dict[str, Any],
+    destination: str,
+    start: date,
+    day_count: int,
+    interests: list[str],
+    places: list[dict[str, Any]],
+) -> Any:
+    daily_plan = []
+    slots = [("09:00", "11:00"), ("13:00", "15:00"), ("16:00", "18:00")]
+    place_index = 0
+    for index in range(day_count):
+        current = start + timedelta(days=index)
+        interest = interests[index % len(interests)]
+        activities = []
+        for slot_index, (start_time, end_time) in enumerate(slots):
+            place = places[place_index % len(places)]
+            place_index += 1
+            title = str(place.get("title") or f"{destination} researched place")
+            address = str(place.get("address") or destination)
+            place_type = str(place.get("type") or "place")
+            rating = place.get("rating")
+            rating_text = f" Rating: {rating}." if rating is not None else ""
+            activities.append(
+                {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "title": title,
+                    "location_name": address,
+                    "description": f"Live MCP place result for {place_type}.{rating_text} Verify opening hours and ticket availability before booking.",
+                    "map_link": place.get("link") or f"https://www.google.com/maps/search/?api=1&query={title.replace(' ', '+')}",
+                    "booking_link": place.get("website"),
+                    "status": "pending",
+                    "transport": {
+                        "from_location": "previous activity or hotel",
+                        "to_location": address,
+                        "mode": "transit",
+                        "duration_text": "Confirm live transit duration before final approval.",
+                        "status": "pending",
+                    },
+                }
+            )
+        daily_plan.append(
+            {
+                "day_index": index + 1,
+                "date": current,
+                "city": destination,
+                "theme": f"{destination} {interest}",
+                "summary": f"Uses live MCP place results for {destination}; downstream bureaus must verify hours, bookings, weather, and transport.",
+                "activities": activities,
+                "accommodation_note": "Choose a central base near the selected activity cluster.",
+            }
+        )
+
+    fallback_reason = str(variables.get("fallback_reason") or "structured_llm_timeout")
+    return output_model.model_validate(
+        {
+            "destination": destination,
+            "overview": "Live MCP research was used to build this draft; structured LLM synthesis was unavailable, so the plan remains pending review.",
+            "trip_style": "live_research_fallback",
+            "daily_plan": daily_plan,
+            "planning_notes": [
+                f"structured_llm_timeout_or_error={fallback_reason}",
+                "data_source=live_mcp_research; synthesis=fallback_from_compact_tool_results.",
+                "Review all opening hours, reservation requirements, and transport durations before final approval.",
+            ],
+            "pending_confirmations": [
+                "Confirm official opening hours and ticket availability for each listed place.",
+                "Confirm transit duration and routing between daily activities.",
+            ],
+            "risk_flags": [
+                "LLM structured synthesis timed out; itinerary order is deterministic from live place results.",
+                "Live place search does not guarantee booking availability.",
+            ],
+        }
+    )
+
+
+def _extract_live_places(research_context: Any) -> list[dict[str, Any]]:
+    if not isinstance(research_context, str) or research_context.startswith(FALLBACK_MESSAGE):
+        return []
+    try:
+        payload = json.loads(research_context)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    places: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict) or item.get("status") != "ok":
+            continue
+        result = item.get("result")
+        if not isinstance(result, dict):
+            continue
+        candidates: list[dict[str, Any]] = []
+        local_results = result.get("local_results")
+        if isinstance(local_results, list):
+            candidates.extend(candidate for candidate in local_results if isinstance(candidate, dict))
+        place_result = result.get("place_results")
+        if isinstance(place_result, dict):
+            candidates.append(place_result)
+        for candidate in candidates:
+            title = str(candidate.get("title") or "").strip()
+            if not title or title in seen:
+                continue
+            seen.add(title)
+            places.append(candidate)
+    return places[:9]
 
 
 def _parse_date(value: Any) -> date | None:

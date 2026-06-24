@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from math import ceil
@@ -8,11 +9,13 @@ from typing import Any, TypedDict
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, StateGraph
 
-from utils.agent_runtime import run_react_mcp_task, soul_path_for
+from utils.agent_runtime import escape_prompt_template_text, run_react_mcp_task, soul_path_for
 from utils.schemas import BudgetExecutionResult
 from utils.llm_factory import build_qwen_chat
+from utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
+STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS: float | None = None
 
 
 class BudgetState(TypedDict, total=False):
@@ -70,13 +73,19 @@ class BudgetBureau:
             try:
                 structured = llm.with_structured_output(BudgetExecutionResult)
                 prompt = ChatPromptTemplate.from_messages([
-                    ("system", Path(self.soul_path).read_text(encoding="utf-8")),
-                    ("user", "Draft: {draft}\nProfile: {profile}\nResearch notes: {research_notes}\nReturn a structured budget output."),
+                    ("system", escape_prompt_template_text(Path(self.soul_path).read_text(encoding="utf-8"))),
+                    ("user", "Draft: {draft}\nProfile: {profile}\nResearch notes: {research_notes}\nReturn valid JSON structured budget output."),
                 ])
-                result = await (prompt | structured).ainvoke({"draft": str(state.get("draft", {})), "profile": str(state.get("profile", {})), "research_notes": state.get("research_notes", "")})
+                result = await asyncio.wait_for(
+                    (prompt | structured).ainvoke({"draft": str(state.get("draft", {})), "profile": str(state.get("profile", {})), "research_notes": state.get("research_notes", "")}),
+                    timeout=STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS or get_settings().qwen_timeout_seconds,
+                )
                 data = result.model_dump(mode="json")
                 data.update({"status": "ok", "data_source": "structured_llm"})
                 return {"result": data}
+            except asyncio.TimeoutError:
+                logger.warning("Budget structured synthesis timed out; using fallback result.")
+                failure_warning = "Budget structured synthesis timed out."
             except Exception as exc:
                 logger.warning("Budget structured synthesis failed; using fallback result: %s", exc)
                 failure_warning = f"Budget structured synthesis failed: {exc}"

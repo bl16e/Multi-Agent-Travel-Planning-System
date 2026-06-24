@@ -204,6 +204,9 @@ components:
         resume_state:
           type: object
           additionalProperties: true
+        replay_reason:
+          type: string
+          nullable: true
     RejectionResponse:
       type: object
       required: [status, request_id]
@@ -218,6 +221,17 @@ components:
           type: boolean
         reason:
           type: string
+        dashboard_url:
+          type: string
+          nullable: true
+        follow_up_task:
+          type: object
+          additionalProperties: true
+          nullable: true
+        rejection_count:
+          type: integer
+        max_rejection_rounds:
+          type: integer
     BureauResult:
       type: object
       required: [bureau, data_source]
@@ -263,6 +277,29 @@ components:
         dashboard_url:
           type: string
           nullable: true
+        booking_links:
+          type: array
+          items:
+            type: string
+        packing_list:
+          type: array
+          items:
+            type: string
+        progress_events:
+          type: array
+          items:
+            type: object
+        generated_at:
+          type: string
+          format: date-time
+        resume_mode:
+          enum: [boundary, replay, none]
+        resume_state:
+          type: object
+          additionalProperties: true
+        replay_reason:
+          type: string
+          nullable: true
     DashboardSnapshot:
       type: object
       required: [request_id, status]
@@ -286,6 +323,12 @@ components:
           type: boolean
         resume_mode:
           enum: [boundary, replay, none]
+        resume_state:
+          type: object
+          additionalProperties: true
+        replay_reason:
+          type: string
+          nullable: true
     ErrorResponse:
       type: object
       required: [detail]

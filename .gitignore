@@ -46,3 +46,6 @@ Thumbs.db
 *.tmp
 
 *.md
+!specs/001-resolve-report-issues/quickstart.md
+!specs/001-resolve-report-issues/tasks.md
+!specs/001-resolve-report-issues/verification-evidence.md

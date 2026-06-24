@@ -5,7 +5,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from utils.agent_runtime import run_react_mcp_task, run_structured_synthesis, soul_path_for
+from utils.agent_runtime import run_direct_mcp_tool_calls, run_structured_synthesis, soul_path_for
 from utils.schemas import BureauTaskSpec, ItineraryDraftModel, ZhongshuDraftPacketModel
 
 
@@ -100,13 +100,9 @@ class ZhongshuItineraryAgent:
         normalized = state["normalized_request"]
 
         try:
-            research_context = await run_react_mcp_task(
-                soul_path=self.soul_path,
+            research_context = await run_direct_mcp_tool_calls(
                 server_names=["serpapi"],
-                user_task=(
-                    f"搜索{normalized['destination']}的热门景点，与以下兴趣相关：{', '.join(normalized.get('interests', []))}。"
-                    f"找到具体景点名称、地址和预订信息。"
-                ),
+                tool_calls=self._build_place_research_tool_calls(normalized),
             )
 
             draft = await run_structured_synthesis(
@@ -142,7 +138,6 @@ class ZhongshuItineraryAgent:
                     "revision_requests": "\n".join(normalized.get("revision_requests", [])),
                     "research_context": research_context,
                 },
-                timeout_seconds=500.0,
             )
             return {"draft": draft.model_dump(mode="json")}
         except Exception as e:
@@ -203,6 +198,38 @@ class ZhongshuItineraryAgent:
             elif bureau == "FLIGHT_TRANSPORT":
                 tasks.append(BureauTaskSpec(bureau="FLIGHT_TRANSPORT", objective="Recommend inbound, outbound, and key local transport options.", inputs_required=["origin_city", "destination", "start_date", "end_date", "daily_plan"], deliverables=["flight_options", "transport_notes", "booking_links"], priority="medium"))
         return tasks
+
+    def _build_place_research_tool_calls(self, normalized: dict[str, Any]) -> list[dict[str, Any]]:
+        destination = str(normalized.get("destination") or "").strip()
+        interests = ", ".join(normalized.get("interests", []))
+        user_message = str(normalized.get("user_message") or "").strip()
+        revision_requests = "; ".join(normalized.get("revision_requests", []))
+        place_query_parts = [
+            destination,
+            interests,
+            user_message,
+            revision_requests,
+            "official site booking information attractions",
+        ]
+        place_query = " ".join(part for part in place_query_parts if part).strip()
+        maps_query = f"{destination} named attractions transport directions"
+        if user_message:
+            maps_query = f"{destination} {user_message}"
+        return [
+            {
+                "tool": "search_local_places",
+                "args": {
+                    "query": place_query,
+                    "location": destination,
+                },
+            },
+            {
+                "tool": "search_google_maps",
+                "args": {
+                    "query": maps_query,
+                },
+            },
+        ]
 
     def _build_pending_confirmations(self, normalized: dict[str, Any]) -> list[str]:
         items = [
