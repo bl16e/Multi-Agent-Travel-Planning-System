@@ -1,4 +1,4 @@
-# Multi-Agent Travel Planning System
+﻿# Multi-Agent Travel Planning System
 
 LangGraph-based travel planning MVP using the "Three Provinces, Six Bureaus" workflow:
 
@@ -30,6 +30,11 @@ The main environment variables are:
 - `SERPAPI_API_KEY`
 - `OUTPUT_DIR`
 - `SESSION_STORE_DIR`
+- `LANGGRAPH_CHECKPOINT_DB`
+- `QWEN_TIMEOUT_SECONDS`
+- `PLAN_REQUEST_TIMEOUT_SECONDS`
+- `MCP_TOOLING_TIMEOUT_SECONDS`
+- `LIUBU_TOOL_TIMEOUT_SECONDS`
 - `RUN_LIVE_TESTS`
 
 See [docs/operations.md](docs/operations.md) for operational details.
@@ -38,9 +43,9 @@ See [docs/operations.md](docs/operations.md) for operational details.
 
 - `GET /health`
 - `POST /plan`
-- `POST /plan/stream`
+- `POST /plan/stream` (`text/event-stream`)
 - `POST /resume/{request_id}`
-- `POST /resume/{request_id}/stream`
+- `POST /resume/{request_id}/stream` (`text/event-stream`)
 - `GET /dashboard/{request_id}`
 - `GET /download/{request_id}`
 
@@ -61,4 +66,4 @@ RUN_LIVE_TESTS=1 python -m pytest -q -m live
 
 ## Outputs
 
-The workflow writes Markdown and iCalendar artifacts under `OUTPUT_DIR` and stores resumable JSON sessions under `SESSION_STORE_DIR`. New planning requests require `request_id` values to match `[A-Za-z0-9_.-]{1,100}` so API routes, sessions, and artifact filenames stay consistent.
+The workflow writes Markdown and iCalendar artifacts under `OUTPUT_DIR`, stores JSON session metadata under `SESSION_STORE_DIR`, and stores durable LangGraph checkpoints in `LANGGRAPH_CHECKPOINT_DB`. New planning requests require `request_id` values to match `[A-Za-z0-9_.-]{1,100}` so API routes, sessions, checkpoints, and artifact filenames stay consistent.

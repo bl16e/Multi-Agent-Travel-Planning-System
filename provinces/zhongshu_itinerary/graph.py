@@ -1,11 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from datetime import date, timedelta
 from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from utils.agent_runtime import run_direct_mcp_tool_calls, run_structured_synthesis, soul_path_for
+from utils.agent_runtime import run_structured_synthesis, soul_path_for
 from utils.schemas import BureauTaskSpec, ItineraryDraftModel, ZhongshuDraftPacketModel
 
 
@@ -100,10 +99,7 @@ class ZhongshuItineraryAgent:
         normalized = state["normalized_request"]
 
         try:
-            research_context = await run_direct_mcp_tool_calls(
-                server_names=["serpapi"],
-                tool_calls=self._build_place_research_tool_calls(normalized),
-            )
+            research_context = "Direct MCP tool calls removed; rebuild with official LangGraph ToolNode or LangChain MCP agent integration."
 
             draft = await run_structured_synthesis(
                 soul_path=self.soul_path,
@@ -199,64 +195,4 @@ class ZhongshuItineraryAgent:
                 tasks.append(BureauTaskSpec(bureau="FLIGHT_TRANSPORT", objective="Recommend inbound, outbound, and key local transport options.", inputs_required=["origin_city", "destination", "start_date", "end_date", "daily_plan"], deliverables=["flight_options", "transport_notes", "booking_links"], priority="medium"))
         return tasks
 
-    def _build_place_research_tool_calls(self, normalized: dict[str, Any]) -> list[dict[str, Any]]:
-        destination = str(normalized.get("destination") or "").strip()
-        interests = ", ".join(normalized.get("interests", []))
-        user_message = str(normalized.get("user_message") or "").strip()
-        revision_requests = "; ".join(normalized.get("revision_requests", []))
-        place_query_parts = [
-            destination,
-            interests,
-            user_message,
-            revision_requests,
-            "official site booking information attractions",
-        ]
-        place_query = " ".join(part for part in place_query_parts if part).strip()
-        maps_query = f"{destination} named attractions transport directions"
-        if user_message:
-            maps_query = f"{destination} {user_message}"
-        return [
-            {
-                "tool": "search_local_places",
-                "args": {
-                    "query": place_query,
-                    "location": destination,
-                },
-            },
-            {
-                "tool": "search_google_maps",
-                "args": {
-                    "query": maps_query,
-                },
-            },
-        ]
 
-    def _build_pending_confirmations(self, normalized: dict[str, Any]) -> list[str]:
-        items = [
-            "Confirm final accommodation booking before issuing the calendar bundle.",
-            "Confirm one primary paid attraction per day to reduce queue risk.",
-        ]
-        if normalized.get("total_budget") is None:
-            items.append("Confirm total budget cap so Budget bureau can evaluate overruns.")
-        if not normalized.get("origin_city"):
-            items.append("Confirm departure city or airport before Flight & Transport research.")
-        return items
-
-    def _build_risk_flags(self, normalized: dict[str, Any]) -> list[str]:
-        flags = [
-            "Opening hours and ticket availability may change and must be reviewed downstream.",
-            "Weather suitability is not yet validated and may alter outdoor blocks.",
-        ]
-        if normalized.get("constraints"):
-            flags.append("User constraints may invalidate some attractions and require review filtering.")
-        return flags
-
-    def _parse_date(self, value: Any) -> date | None:
-        if isinstance(value, date):
-            return value
-        if isinstance(value, str):
-            try:
-                return date.fromisoformat(value)
-            except ValueError:
-                return None
-        return None

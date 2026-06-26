@@ -7,9 +7,7 @@ from typing import Any
 
 from langgraph.types import Send
 
-from utils.permission_matrix import ActionType, AgentRole, enforce_permission
-from utils.schemas import DepartmentTaskModel, ProgressEvent
-from utils.state_machine import TravelWorkflowStateMachine, WorkflowState
+from utils.schemas import AgentRole, DepartmentTaskModel, ProgressEvent, WorkflowState
 
 logger = logging.getLogger(__name__)
 
@@ -47,21 +45,19 @@ class ShangshuWorkflowContext:
 
 
 class ShangshuOrchestrator:
-    def __init__(self) -> None:
-        self._machines: dict[str, TravelWorkflowStateMachine] = {}
+    """Payload assembler for the LangGraph workflow.
+
+    This class intentionally does not maintain a parallel state machine or
+    permission matrix. LangGraph nodes, edges, and future checkpointers are the
+    official source of workflow control.
+    """
 
     def bootstrap(self, request_id: str, user_request: dict[str, Any]) -> ShangshuWorkflowContext:
-        self._machines[request_id] = TravelWorkflowStateMachine()
-        context = ShangshuWorkflowContext(
-            request_id=request_id,
-            user_request=user_request,
-            current_state=self._machine_for(request_id).current_state,
-        )
+        context = ShangshuWorkflowContext(request_id=request_id, user_request=user_request)
         self._record_progress(context, stage="bootstrap", message="Shangshu accepted the planning request.", actor=AgentRole.SHANGSHU)
         return context
 
     def dispatch_to_zhongshu(self, context: ShangshuWorkflowContext) -> DispatchBundle:
-        enforce_permission(AgentRole.SHANGSHU, ActionType.SUBMIT_REQUEST, AgentRole.ZHONGSHU)
         task = DepartmentTaskModel(
             target=AgentRole.ZHONGSHU,
             task_type="plan_itinerary_draft",
@@ -83,10 +79,7 @@ class ShangshuOrchestrator:
 
     def submit_draft_to_review(self, context: ShangshuWorkflowContext, draft_payload: dict[str, Any]) -> DispatchBundle:
         context.draft_payload = draft_payload
-        if context.current_state == WorkflowState.REJECTED:
-            self._transition(context, WorkflowState.DRAFT, actor=AgentRole.ZHONGSHU, reason="Zhongshu reopened the workflow with a revised draft.")
-        self._transition(context, WorkflowState.REVIEW, actor=AgentRole.ZHONGSHU, reason="Zhongshu completed a draft and submitted it for review.")
-        enforce_permission(AgentRole.ZHONGSHU, ActionType.SUBMIT_DRAFT_FOR_REVIEW, AgentRole.MENXIA)
+        context.current_state = WorkflowState.REVIEW
         task = DepartmentTaskModel(
             target=AgentRole.MENXIA,
             task_type="review_itinerary_draft",
@@ -106,15 +99,13 @@ class ShangshuOrchestrator:
         context.review_payload = review_payload
 
         if verdict == WorkflowState.APPROVED.value:
-            enforce_permission(AgentRole.MENXIA, ActionType.RETURN_REVIEW_VERDICT, AgentRole.SHANGSHU)
-            self._transition(context, WorkflowState.APPROVED, actor=AgentRole.MENXIA, reason="Menxia approved the draft.", metadata={"review_payload": review_payload})
+            context.current_state = WorkflowState.APPROVED
             self._record_progress(context, stage="review_approved", message="Draft approved; Shangshu can dispatch Liubu execution.", actor=AgentRole.SHANGSHU)
             return None
 
         if verdict == WorkflowState.REJECTED.value:
-            enforce_permission(AgentRole.MENXIA, ActionType.RETURN_REVISION_FEEDBACK, AgentRole.ZHONGSHU)
+            context.current_state = WorkflowState.REJECTED
             context.rejection_count += 1
-            self._transition(context, WorkflowState.REJECTED, actor=AgentRole.MENXIA, reason="Menxia rejected the draft and returned revision notes.", metadata={"review_payload": review_payload})
             retry_allowed = context.rejection_count < context.max_rejection_rounds
             status_note = "routed back to Zhongshu" if retry_allowed else "reached rejection limit"
             self._record_progress(context, stage="review_rejected", message=f"Draft rejected and {status_note}.", actor=AgentRole.SHANGSHU)
@@ -134,12 +125,12 @@ class ShangshuOrchestrator:
                         "retry_allowed": retry_allowed,
                     },
                 },
-                reason="Menxia exercised veto and requested revisions.",
+                reason="Menxia requested revisions.",
             )
             return self._build_dispatch_bundle(task)
 
         if verdict == WorkflowState.HUMAN_INTERVENE.value:
-            self._transition(context, WorkflowState.HUMAN_INTERVENE, actor=AgentRole.MENXIA, reason="Menxia requested user intervention.", metadata={"review_payload": review_payload})
+            context.current_state = WorkflowState.HUMAN_INTERVENE
             question = str((review_payload.get("human_questions") or [review_payload.get("question") or "Review requires human intervention."])[0])
             context.pending_user_inputs.append(question)
             self._record_progress(context, stage="review_interrupt", message=question, actor=AgentRole.SHANGSHU)
@@ -148,11 +139,10 @@ class ShangshuOrchestrator:
         raise ValueError(f"Unsupported review verdict: {verdict}")
 
     def dispatch_liubu_execution(self, context: ShangshuWorkflowContext, execution_plan: dict[str, Any]) -> DispatchBundle:
-        self._transition(context, WorkflowState.EXECUTE, actor=AgentRole.SHANGSHU, reason="Approved draft moved into execution dispatch.", metadata={"execution_plan": execution_plan})
+        context.current_state = WorkflowState.EXECUTE
         sends: list[Send] = []
         tasks: list[DepartmentTaskModel] = []
         for bureau in self._resolve_liubu_targets(execution_plan):
-            enforce_permission(AgentRole.SHANGSHU, ActionType.DISPATCH_EXECUTION, bureau)
             task = DepartmentTaskModel(
                 target=bureau,
                 task_type="execute_specialist_task",
@@ -162,7 +152,7 @@ class ShangshuOrchestrator:
                     "review_payload": context.review_payload or {},
                     "execution_plan": execution_plan,
                     "target_bureau": bureau.value,
-                    "governance": {"source_state": context.current_state.value, "no_cross_bureau_send": True},
+                    "governance": {"source_state": context.current_state.value},
                 },
                 reason="Shangshu dispatches approved tasks to Liubu.",
             )
@@ -173,7 +163,6 @@ class ShangshuOrchestrator:
 
     def register_execution_result(self, context: ShangshuWorkflowContext, bureau: AgentRole | str, result_payload: dict[str, Any]) -> None:
         role = AgentRole(bureau)
-        enforce_permission(role, ActionType.RETURN_EXECUTION_RESULT, AgentRole.SHANGSHU)
         context.execution_results[role.value] = result_payload
         self._record_progress(context, stage="execution_result", message=f"{role.value} execution result received.", actor=role)
         quality = result_payload.get("liubu_quality")
@@ -188,7 +177,7 @@ class ShangshuOrchestrator:
             )
 
     def assemble_outputs(self, context: ShangshuWorkflowContext) -> dict[str, Any]:
-        self._transition(context, WorkflowState.ASSEMBLE, actor=AgentRole.SHANGSHU, reason="All required Liubu responses received; assembling final outputs.")
+        context.current_state = WorkflowState.ASSEMBLE
         assembled = {
             "request_id": context.request_id,
             "workflow_state": WorkflowState.ASSEMBLE.value,
@@ -197,11 +186,11 @@ class ShangshuOrchestrator:
             "review": context.review_payload or {},
             "execution_results": context.execution_results,
             "progress_events": context.progress_events,
-            "state_history": self._machine_for(context.request_id).export_history(),
+            "state_history": [],
         }
         context.assembled_output = assembled
         self._record_progress(context, stage="assemble", message="Final package assembly completed.", actor=AgentRole.SHANGSHU)
-        self._transition(context, WorkflowState.DONE, actor=AgentRole.SHANGSHU, reason="Final package is ready for delivery.")
+        context.current_state = WorkflowState.DONE
         return assembled
 
     def build_dashboard_link(self, context: ShangshuWorkflowContext) -> str:
@@ -241,15 +230,6 @@ class ShangshuOrchestrator:
             AgentRole.FLIGHT_TRANSPORT: "liubu_flight_transport",
             AgentRole.CALENDAR: "liubu_calendar",
         }[target]
-
-    def _machine_for(self, request_id: str) -> TravelWorkflowStateMachine:
-        if request_id not in self._machines:
-            self._machines[request_id] = TravelWorkflowStateMachine()
-        return self._machines[request_id]
-
-    def _transition(self, context: ShangshuWorkflowContext, next_state: WorkflowState, *, actor: AgentRole, reason: str, metadata: dict[str, Any] | None = None) -> None:
-        record = self._machine_for(context.request_id).transition_to(next_state, actor=actor.value, reason=reason, metadata=metadata)
-        context.current_state = record.to_state
 
     def _record_progress(self, context: ShangshuWorkflowContext, *, stage: str, message: str, actor: AgentRole) -> None:
         event = ProgressEvent(stage=stage, message=message, actor=actor.value, state=context.current_state.value, timestamp=datetime.now(timezone.utc))

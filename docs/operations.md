@@ -6,11 +6,11 @@ Default mode is offline-safe. If `QWEN_API_KEY` is unset, structured agent calls
 
 Live mode is opt-in. Set `QWEN_API_KEY` and any tool keys you need, then set `RUN_LIVE_TESTS=1` only when you intentionally want tests marked `live` to call real services.
 
-Human-intervention mode is API-safe by default. `ENABLE_LANGGRAPH_INTERRUPTS=0`
-means the HTTP service returns a `HUMAN_INTERVENE` response with `resume_mode`
-and `resume_state` instead of waiting indefinitely for an interactive
-checkpoint. New sessions should resume from `resume_mode=boundary`; legacy or
-incompatible sessions may report `resume_mode=replay` with a replay reason.
+Human-intervention mode is API-safe by default. The HTTP service returns a
+`HUMAN_INTERVENE` response with `resume_mode=boundary` and checkpoint metadata
+instead of waiting indefinitely for interactive input. Resume calls continue the
+same LangGraph thread with `Command(resume=...)`; legacy sessions without
+boundary checkpoint metadata return HTTP 409.
 
 ## Environment
 
@@ -21,10 +21,14 @@ incompatible sessions may report `resume_mode=replay` with a replay reason.
 - `SERPAPI_API_KEY`: Optional SerpAPI key.
 - `OUTPUT_DIR`: artifact output directory. Defaults to `artifacts`.
 - `SESSION_STORE_DIR`: JSON session directory. Defaults to `artifacts/sessions`.
+- `LANGGRAPH_CHECKPOINT_DB`: SQLite LangGraph checkpoint database. Defaults to `artifacts/langgraph_checkpoints.sqlite`.
 - `SESSION_CACHE_MAX_ENTRIES`: maximum in-memory runtime session cache entries. Defaults to `500`.
 - `SESSION_CACHE_TTL_SECONDS`: runtime session cache entry lifetime in seconds. Defaults to `86400` (24 hours).
-- `ENABLE_LANGGRAPH_INTERRUPTS`: set to `1` only for an explicitly configured interrupt/checkpoint runtime. Defaults to `0` so the HTTP service returns resumable human-intervention responses instead of waiting indefinitely.
+- `ENABLE_LANGGRAPH_INTERRUPTS`: retained for compatibility with existing environment files. HTTP resume uses boundary checkpoints and does not wait indefinitely for interactive input.
 - `QWEN_TIMEOUT_SECONDS`: timeout in seconds for Qwen/OpenAI-compatible structured generation and ReAct MCP agent calls. Defaults to `60`.
+- `PLAN_REQUEST_TIMEOUT_SECONDS`: timeout in seconds for top-level LangGraph plan, resume, and stream steps. Defaults to `300`.
+- `MCP_TOOLING_TIMEOUT_SECONDS`: timeout in seconds for MCP tool discovery through the LangChain MCP adapter. Defaults to `30`.
+- `LIUBU_TOOL_TIMEOUT_SECONDS`: timeout in seconds for Liubu tool-bound model calls and ToolNode execution. Defaults to `30`.
 - `RUN_LIVE_TESTS`: set to `1` to enable live tests.
 
 ## Tests
@@ -82,7 +86,7 @@ Generated Markdown and iCalendar files are written under `OUTPUT_DIR` or the con
 
 Offline budget fallback estimates activities, accommodation, food, local transport, origin-destination transport, and incidentals from trip length, travelers, and budget level. These are planning estimates, not live prices.
 
-Sessions are stored as JSON files under `SESSION_STORE_DIR`. Writes use a temporary file and atomic replacement. If a stored session cannot be parsed or validated, resume/dashboard APIs return HTTP 409. Runtime session cache entries are bounded by `SESSION_CACHE_MAX_ENTRIES` and `SESSION_CACHE_TTL_SECONDS`; cache eviction must not delete the persisted JSON session. The default service mode keeps LangGraph interrupts disabled for public HTTP requests so human intervention is represented as structured, resumable state.
+Sessions are stored as JSON files under `SESSION_STORE_DIR`, while executable LangGraph state is stored in the SQLite database configured by `LANGGRAPH_CHECKPOINT_DB`. Writes use a temporary file and atomic replacement for JSON metadata. If a stored session cannot be parsed or validated, resume/dashboard APIs return HTTP 409. Runtime session cache entries are bounded by `SESSION_CACHE_MAX_ENTRIES` and `SESSION_CACHE_TTL_SECONDS`; cache eviction must not delete the persisted JSON session or LangGraph checkpoint. Public HTTP requests represent human intervention as structured, resumable boundary state.
 
 Runtime cache cleanup happens before resume and dashboard reads. This keeps
 stale in-memory sessions bounded while preserving persisted JSON sessions as

@@ -1,4 +1,4 @@
-import pytest
+﻿import pytest
 import utils.agent_runtime as agent_runtime
 from provinces.zhongshu_itinerary.graph import ZhongshuItineraryAgent
 from utils.schemas import ItineraryDraftModel
@@ -48,11 +48,7 @@ async def test_ingest_request_rejects_missing_destination_preferences():
 
 @pytest.mark.asyncio
 async def test_draft_itinerary_offline_output_uses_request_destination(monkeypatch):
-    async def fake_research(**kwargs):
-        return agent_runtime.FALLBACK_MESSAGE
-
     monkeypatch.setattr(agent_runtime, "build_qwen_chat", lambda: None)
-    monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_direct_mcp_tool_calls", fake_research)
 
     agent = ZhongshuItineraryAgent()
     result = await agent.draft_itinerary(
@@ -84,15 +80,11 @@ async def test_draft_itinerary_offline_output_uses_request_destination(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_draft_itinerary_uses_direct_place_tool_calls(monkeypatch):
+async def test_draft_itinerary_passes_official_rewrite_placeholder_to_synthesis(monkeypatch):
     seen = {}
 
-    async def fake_direct_research(**kwargs):
-        seen["server_names"] = kwargs.get("server_names")
-        seen["tool_calls"] = kwargs.get("tool_calls")
-        return "Senso-ji Temple; Tokyo National Museum; Tsukiji Outer Market; Shinjuku Gyoen."
-
     async def fake_synthesis(**kwargs):
+        seen["variables"] = kwargs.get("variables")
         return ItineraryDraftModel.model_validate(
             {
                 "destination": "Tokyo",
@@ -119,13 +111,12 @@ async def test_draft_itinerary_uses_direct_place_tool_calls(monkeypatch):
             }
         )
 
-    monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_direct_mcp_tool_calls", fake_direct_research)
     monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_structured_synthesis", fake_synthesis)
 
     agent = ZhongshuItineraryAgent()
     await agent.draft_itinerary(
         {
-            "request_id": "tool_limit",
+            "request_id": "official_placeholder",
             "normalized_request": {
                 "destination": "Tokyo",
                 "origin_city": "Beijing",
@@ -145,17 +136,14 @@ async def test_draft_itinerary_uses_direct_place_tool_calls(monkeypatch):
         }
     )
 
-    assert seen["server_names"] == ["serpapi"]
-    assert {call["tool"] for call in seen["tool_calls"]} <= {"search_google_maps", "search_local_places"}
-    assert any(call["tool"] == "search_local_places" for call in seen["tool_calls"])
+    assert "Direct MCP tool calls removed" in seen["variables"]["research_context"]
+    assert "ToolNode" in seen["variables"]["research_context"]
 
 
 @pytest.mark.asyncio
 async def test_draft_itinerary_does_not_hardcode_structured_synthesis_timeout(monkeypatch):
     seen = {}
 
-    async def fake_direct_research(**kwargs):
-        return "Senso-ji Temple; Tokyo National Museum."
 
     async def fake_synthesis(**kwargs):
         seen["timeout_seconds"] = kwargs.get("timeout_seconds")
@@ -185,7 +173,6 @@ async def test_draft_itinerary_does_not_hardcode_structured_synthesis_timeout(mo
             }
         )
 
-    monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_direct_mcp_tool_calls", fake_direct_research)
     monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_structured_synthesis", fake_synthesis)
 
     agent = ZhongshuItineraryAgent()
@@ -218,8 +205,6 @@ async def test_draft_itinerary_does_not_hardcode_structured_synthesis_timeout(mo
 async def test_draft_itinerary_passes_readable_chinese_prompt_to_synthesis(monkeypatch):
     seen = {}
 
-    async def fake_direct_research(**kwargs):
-        return "Senso-ji Temple; Tokyo National Museum."
 
     async def fake_synthesis(**kwargs):
         seen["user_prompt"] = kwargs.get("user_prompt")
@@ -249,7 +234,6 @@ async def test_draft_itinerary_passes_readable_chinese_prompt_to_synthesis(monke
             }
         )
 
-    monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_direct_mcp_tool_calls", fake_direct_research)
     monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_structured_synthesis", fake_synthesis)
 
     agent = ZhongshuItineraryAgent()
@@ -276,12 +260,11 @@ async def test_draft_itinerary_passes_readable_chinese_prompt_to_synthesis(monke
     )
 
     assert "请根据用户需求生成详细的旅行行程草案" in seen["user_prompt"]
-    assert "璇锋" not in seen["user_prompt"]
+    assert "鐠囬攱" not in seen["user_prompt"]
 
 
 @pytest.mark.asyncio
 async def test_draft_itinerary_with_llm():
-    """测试完整的行程生成流程（包含LLM调用）"""
     agent = ZhongshuItineraryAgent()
     state = {
         "request_id": "test_llm_001",
@@ -306,3 +289,9 @@ async def test_draft_itinerary_with_llm():
     assert draft["destination"] == "Tokyo"
     assert "daily_plan" in draft
     assert len(draft["daily_plan"]) > 0
+
+
+
+
+
+

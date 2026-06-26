@@ -38,6 +38,13 @@ def _env_int(name: str, default: int) -> int:
     return int(raw)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return float(raw)
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -61,10 +68,14 @@ class AppSettings(BaseModel):
     serpapi_api_key: str | None = Field(default_factory=lambda: os.getenv("SERPAPI_API_KEY"))
     run_live_tests: bool = Field(default_factory=lambda: os.getenv("RUN_LIVE_TESTS") == "1")
     session_store_dir: str = Field(default_factory=lambda: os.getenv("SESSION_STORE_DIR", str(PROJECT_ROOT / "artifacts" / "sessions")))
+    langgraph_checkpoint_db: str = Field(default_factory=lambda: os.getenv("LANGGRAPH_CHECKPOINT_DB", str(PROJECT_ROOT / "artifacts" / "langgraph_checkpoints.sqlite")))
     session_cache_max_entries: int = Field(default_factory=lambda: _env_int("SESSION_CACHE_MAX_ENTRIES", 500))
     session_cache_ttl_seconds: int = Field(default_factory=lambda: _env_int("SESSION_CACHE_TTL_SECONDS", 86400))
     enable_langgraph_interrupts: bool = Field(default_factory=lambda: _env_bool("ENABLE_LANGGRAPH_INTERRUPTS"))
     qwen_timeout_seconds: int = Field(default_factory=lambda: _env_int("QWEN_TIMEOUT_SECONDS", 60))
+    plan_request_timeout_seconds: float = Field(default_factory=lambda: _env_float("PLAN_REQUEST_TIMEOUT_SECONDS", 300.0))
+    mcp_tooling_timeout_seconds: float = Field(default_factory=lambda: _env_float("MCP_TOOLING_TIMEOUT_SECONDS", 30.0))
+    liubu_tool_timeout_seconds: float = Field(default_factory=lambda: _env_float("LIUBU_TOOL_TIMEOUT_SECONDS", 30.0))
 
 
 @lru_cache(maxsize=1)

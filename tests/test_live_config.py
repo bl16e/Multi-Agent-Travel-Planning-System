@@ -20,6 +20,9 @@ def test_runtime_settings_defaults(monkeypatch):
         "SESSION_CACHE_TTL_SECONDS",
         "ENABLE_LANGGRAPH_INTERRUPTS",
         "QWEN_TIMEOUT_SECONDS",
+        "PLAN_REQUEST_TIMEOUT_SECONDS",
+        "MCP_TOOLING_TIMEOUT_SECONDS",
+        "LIUBU_TOOL_TIMEOUT_SECONDS",
     ):
         monkeypatch.delenv(name, raising=False)
     get_settings.cache_clear()
@@ -30,6 +33,9 @@ def test_runtime_settings_defaults(monkeypatch):
     assert settings.session_cache_ttl_seconds == 86400
     assert settings.enable_langgraph_interrupts is False
     assert settings.qwen_timeout_seconds == 60
+    assert settings.plan_request_timeout_seconds == 300
+    assert settings.mcp_tooling_timeout_seconds == 30
+    assert settings.liubu_tool_timeout_seconds == 30
 
 
 def test_runtime_settings_env_overrides(monkeypatch):
@@ -37,6 +43,9 @@ def test_runtime_settings_env_overrides(monkeypatch):
     monkeypatch.setenv("SESSION_CACHE_TTL_SECONDS", "33")
     monkeypatch.setenv("ENABLE_LANGGRAPH_INTERRUPTS", "1")
     monkeypatch.setenv("QWEN_TIMEOUT_SECONDS", "12")
+    monkeypatch.setenv("PLAN_REQUEST_TIMEOUT_SECONDS", "44")
+    monkeypatch.setenv("MCP_TOOLING_TIMEOUT_SECONDS", "5")
+    monkeypatch.setenv("LIUBU_TOOL_TIMEOUT_SECONDS", "6")
     get_settings.cache_clear()
 
     settings = get_settings()
@@ -45,6 +54,9 @@ def test_runtime_settings_env_overrides(monkeypatch):
     assert settings.session_cache_ttl_seconds == 33
     assert settings.enable_langgraph_interrupts is True
     assert settings.qwen_timeout_seconds == 12
+    assert settings.plan_request_timeout_seconds == 44
+    assert settings.mcp_tooling_timeout_seconds == 5
+    assert settings.liubu_tool_timeout_seconds == 6
 
 
 def test_qwen_client_uses_configured_timeout(monkeypatch):

@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 (() => {
   // src/app.ts
   var STEP_NAMES = [
@@ -18,7 +18,6 @@
     return document.getElementById(id);
   }
   var currentRequestId = null;
-  var sseEventType = "";
   var workflowSection = $("workflow-section");
   var resultSection = $("result-section");
   var interveneSection = $("intervene-section");
@@ -47,7 +46,7 @@
     return d.innerHTML;
   }
   function splitTags(s) {
-    return s.split(/[,，]/).map((t) => t.trim()).filter(Boolean);
+    return s.split(/[,锛宂/).map((t) => t.trim()).filter(Boolean);
   }
   function show(el) {
     el.style.display = "block";
@@ -91,7 +90,7 @@
     if (p === "start" || p === "done" || p === "error") return p;
     return "";
   }
-  function startSSEStream(url, body) {
+  function submitJson(url, body) {
     resetNodes();
     logContent.innerHTML = "";
     resultContent.innerHTML = "";
@@ -100,78 +99,24 @@
     hide(rejectedSection);
     show(workflowSection);
     submitBtn.disabled = true;
-    submitBtn.textContent = "\u89C4\u5212\u4E2D...";
+    submitBtn.textContent = "规划中...";
     fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
-    }).then((response) => {
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      function pump() {
-        return reader.read().then(({ done, value }) => {
-          if (done) {
-            onStreamEnd();
-            return;
-          }
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop();
-          for (const line of lines) {
-            processSSELine(line);
-          }
-          return pump();
-        });
+    }).then(async (response) => {
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = data.detail || `HTTP ${response.status}`;
+        throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
       }
-      return pump();
+      renderResult(data);
     }).catch((err) => {
       appendLog(`ERROR: ${err.message}`, "error");
-      onStreamEnd();
+    }).finally(() => {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "开始规划";
     });
-  }
-  function processSSELine(line) {
-    if (line.startsWith("event: ")) {
-      sseEventType = line.substring(7).trim();
-      return;
-    }
-    if (line.startsWith("data: ")) {
-      handleSSEEvent(sseEventType, line.substring(6));
-      sseEventType = "";
-    }
-  }
-  function handleSSEEvent(type, data) {
-    if (type === "progress") {
-      try {
-        const obj = JSON.parse(data);
-        const line = obj.line || data;
-        appendLog(line, parsePhase(line));
-        updateNodeFromLog(line);
-      } catch {
-        appendLog(data, "");
-      }
-    } else if (type === "result") {
-      try {
-        const result = JSON.parse(data);
-        renderResult(result);
-      } catch (e) {
-        appendLog(`Failed to parse result: ${e.message}`, "error");
-      }
-    } else if (type === "error") {
-      try {
-        const err = JSON.parse(data);
-        appendLog(`ERROR: ${err.error || data}`, "error");
-      } catch {
-        appendLog(`ERROR: ${data}`, "error");
-      }
-    } else if (type === "done") {
-      setNodeState("done", "done");
-    }
-  }
-  function onStreamEnd() {
-    submitBtn.disabled = false;
-    submitBtn.textContent = "\u{1F680} \u5F00\u59CB\u89C4\u5212";
   }
   function buildRequestBody() {
     const ts = Date.now();
@@ -306,7 +251,7 @@
   planForm.addEventListener("submit", (e) => {
     e.preventDefault();
     const body = buildRequestBody();
-    startSSEStream("/plan/stream", body);
+    submitJson("/plan", body);
   });
   interveneForm.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -317,10 +262,7 @@
     const budgetVal = $("intervene-budget").value;
     if (budgetVal) payload.profile_updates.total_budget = parseFloat(budgetVal);
     hide(interveneSection);
-    startSSEStream(
-      `/resume/${encodeURIComponent(currentRequestId || "")}/stream`,
-      payload
-    );
+    submitJson(`/resume/${encodeURIComponent(currentRequestId || "")}`, payload);
   });
   window.resetForm = function resetForm() {
     hide(workflowSection);
@@ -333,3 +275,4 @@
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 })();
+

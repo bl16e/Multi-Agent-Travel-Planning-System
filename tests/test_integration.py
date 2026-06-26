@@ -1,5 +1,6 @@
 import pytest
 from provinces.liubu.calendar.service import CalendarBureau
+from provinces.liubu.constrained.state import normalize_worker_input
 from workflow import ProvinceWorkflow
 from utils.schemas import PlanningRequest, TravelerProfile
 
@@ -114,8 +115,14 @@ async def test_final_package_and_artifacts_expose_data_source_labels(tmp_path):
     }
     calendar_result = await CalendarBureau(output_dir=tmp_path).run(
         {
-            "request_id": request.request_id,
-            "approved_draft": draft_packet,
+            "worker_input": normalize_worker_input(
+                {
+                    "request_id": request.request_id,
+                    "approved_draft": draft_packet,
+                    "execution_plan": {"user_request": request.model_dump(mode="json")},
+                },
+                "CALENDAR",
+            )
         }
     )
     execution_results = {

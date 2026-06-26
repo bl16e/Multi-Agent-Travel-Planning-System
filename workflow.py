@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import copy
+import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Annotated, Awaitable, Callable, TypedDict
 
 from langgraph.graph import END, StateGraph
-from langgraph.types import Send
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.types import Command, Send, interrupt
+from langchain_core.messages import BaseMessage
 
+from provinces.liubu.constrained.state import normalize_worker_input
 from provinces.liubu.accommodation.service import AccommodationBureau
 from provinces.liubu.budget.service import BudgetBureau
 from provinces.liubu.calendar.service import CalendarBureau
@@ -17,7 +22,6 @@ from provinces.liubu.weather.service import WeatherBureau
 from provinces.menxia_review.graph import MenxiaReviewAgent
 from provinces.shangshu_orchestrator.orchestrator import ShangshuOrchestrator, ShangshuWorkflowContext
 from provinces.zhongshu_itinerary.graph import ZhongshuItineraryAgent
-from utils.permission_matrix import AgentRole
 from utils.path_safety import sanitize_request_id
 from utils.schemas import (
     AccommodationExecutionResult,
@@ -29,9 +33,12 @@ from utils.schemas import (
     PlanningRequest,
     ProgressEvent,
     WeatherExecutionResult,
+    AgentRole,
+    WorkflowState,
 )
-from utils.state_machine import TravelWorkflowStateMachine, WorkflowState
+from utils.settings import get_settings
 
+logger = logging.getLogger(__name__)
 
 ProgressReporter = Callable[[str], None]
 
@@ -56,7 +63,7 @@ class SystemState(TypedDict, total=False):
     rejected_payload: dict[str, Any]
     resume_state: dict[str, Any]
     resume_mode: str
-    replay_reason: str
+    rewrite_reason: str
 
 
 class ProvinceWorkflow:
@@ -76,16 +83,21 @@ class ProvinceWorkflow:
         self.accommodation = AccommodationBureau()
         self.flight_transport = FlightTransportBureau()
         self.graph = self._build_graph()
+        self._checkpoint_cm = None
+        self._checkpointer = None
+        self._persistent_graph = None
 
     def set_progress_reporter(self, progress_reporter: ProgressReporter | None) -> None:
         self.progress_reporter = progress_reporter
 
-    def _build_graph(self, entry_point: str = "shangshu_preflight"):
+    def _build_graph(self, entry_point: str = "shangshu_preflight", checkpointer: Any | None = None):
         graph = StateGraph(SystemState)
         graph.add_node("shangshu_preflight", self._node_preflight)
+        graph.add_node("interrupt_preflight", self._node_interrupt_preflight)
         graph.add_node("zhongshu_itinerary", self._node_zhongshu)
         graph.add_node("menxia_review", self._node_menxia)
         graph.add_node("shangshu_review_gate", self._node_review_gate)
+        graph.add_node("interrupt_review", self._node_interrupt_review)
         graph.add_node("shangshu_dispatch_liubu", self._node_dispatch_liubu)
         graph.add_node("liubu_weather", self._node_liubu_weather)
         graph.add_node("liubu_budget", self._node_liubu_budget)
@@ -97,17 +109,19 @@ class ProvinceWorkflow:
         graph.add_node("finish_rejected", self._node_finish_rejected)
 
         graph.set_entry_point(entry_point)
-        graph.add_conditional_edges("shangshu_preflight", self._route_after_preflight, {"zhongshu_itinerary": "zhongshu_itinerary", "finish_human_intervene": "finish_human_intervene"})
+        graph.add_conditional_edges("shangshu_preflight", self._route_after_preflight, {"zhongshu_itinerary": "zhongshu_itinerary", "interrupt_preflight": "interrupt_preflight"})
+        graph.add_edge("interrupt_preflight", "zhongshu_itinerary")
         graph.add_conditional_edges("zhongshu_itinerary", self._route_after_zhongshu, {"menxia_review": "menxia_review", "finish_rejected": "finish_rejected"})
         graph.add_edge("menxia_review", "shangshu_review_gate")
         graph.add_conditional_edges(
             "shangshu_review_gate", 
             self._route_after_review, {
-                "shangshu_dispatch_liubu": "shangshu_dispatch_liubu", 
-                "finish_human_intervene": "finish_human_intervene", 
+                "shangshu_dispatch_liubu": "shangshu_dispatch_liubu",
+                "interrupt_review": "interrupt_review",
                 "retry_zhongshu": "zhongshu_itinerary",
                 "finish_rejected": "finish_rejected"
                 })
+        graph.add_edge("interrupt_review", "zhongshu_itinerary")
         graph.add_conditional_edges("shangshu_dispatch_liubu", self._route_to_liubu)
         graph.add_edge("liubu_weather", "shangshu_assemble")
         graph.add_edge("liubu_budget", "shangshu_assemble")
@@ -117,41 +131,126 @@ class ProvinceWorkflow:
         graph.add_edge("shangshu_assemble", END)
         graph.add_edge("finish_human_intervene", END)
         graph.add_edge("finish_rejected", END)
-        return graph.compile()
+        return graph.compile(checkpointer=checkpointer)
+
+    async def _ensure_persistent_graph(self):
+        if self._persistent_graph is not None:
+            return self._persistent_graph
+        checkpoint_db = Path(get_settings().langgraph_checkpoint_db)
+        checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
+        self._checkpoint_cm = AsyncSqliteSaver.from_conn_string(str(checkpoint_db))
+        self._checkpointer = await self._checkpoint_cm.__aenter__()
+        self._persistent_graph = self._build_graph(checkpointer=self._checkpointer)
+        return self._persistent_graph
+
+    async def _close_checkpointer(self) -> None:
+        if self._checkpoint_cm is not None:
+            await self._checkpoint_cm.__aexit__(None, None, None)
+        self._checkpoint_cm = None
+        self._checkpointer = None
+        self._persistent_graph = None
 
     async def run(self, request: PlanningRequest) -> dict[str, Any]:
         self._emit_progress("workflow", "start", f"start request {request.request_id}", request.model_dump(mode="json"))
-        result = await self.graph.ainvoke({"request": request.model_dump(mode="json")})
-        self._emit_progress("workflow", "done", f"workflow finished with status={result.get('status', 'UNKNOWN')}", result)
-        return result
+        try:
+            graph = await self._ensure_persistent_graph()
+            config = self._thread_config(request.request_id)
+            result = await self._await_graph_result(
+                graph.ainvoke({"request": request.model_dump(mode="json")}, config=config),
+                request_id=request.request_id,
+                operation="Workflow run",
+            )
+            result = await self._normalize_interrupt_result(result, config)
+            self._emit_progress("workflow", "done", f"workflow finished with status={result.get('status', 'UNKNOWN')}", result)
+            return result
+        finally:
+            await self._close_checkpointer()
+
+    async def stream_run(self, request: PlanningRequest):
+        self._emit_progress("workflow", "start", f"start request {request.request_id}", request.model_dump(mode="json"))
+        config = self._thread_config(request.request_id)
+        try:
+            graph = await self._ensure_persistent_graph()
+            async for event in self._stream_graph_events(
+                graph,
+                {"request": request.model_dump(mode="json")},
+                config,
+            ):
+                yield event
+        finally:
+            await self._close_checkpointer()
 
     async def resume(self, resume_state: dict[str, Any], human_resume: Any) -> dict[str, Any]:
-        if resume_state.get("mode") != "boundary":
-            raise ValueError("Unsupported resume boundary mode")
-        next_node = resume_state.get("next_node")
-        if next_node not in {"zhongshu_itinerary"}:
-            raise ValueError(f"Unsupported resume boundary node: {next_node}")
-        state_snapshot = dict(resume_state.get("state") or {})
-        if "request" not in state_snapshot:
-            raise ValueError("Resume boundary is missing request state")
+        thread_id = str(resume_state.get("thread_id") or "")
+        if not thread_id:
+            raise ValueError("Cannot resume without boundary checkpoint thread_id.")
+        try:
+            graph = await self._ensure_persistent_graph()
+            config = self._thread_config(thread_id)
+            resume_payload = human_resume.model_dump(mode="python") if hasattr(human_resume, "model_dump") else dict(human_resume or {})
+            result = await self._await_graph_result(
+                graph.ainvoke(Command(resume=resume_payload), config=config),
+                request_id=thread_id,
+                operation="Workflow resume",
+            )
+            return await self._normalize_interrupt_result(result, config)
+        finally:
+            await self._close_checkpointer()
 
-        request = PlanningRequest.model_validate(state_snapshot["request"])
-        effective_request = self._merge_request_for_resume(request, human_resume)
-        state_snapshot["request"] = effective_request.model_dump(mode="json")
-        context_snapshot = state_snapshot.get("context")
-        if isinstance(context_snapshot, dict):
-            context = self._deserialize_context(context_snapshot)
-        else:
-            context = self.orchestrator.bootstrap(effective_request.request_id, effective_request.model_dump(mode="json"))
-        state_snapshot["context"] = context
+    async def stream_resume(self, resume_state: dict[str, Any], human_resume: Any):
+        thread_id = str(resume_state.get("thread_id") or "")
+        if not thread_id:
+            raise ValueError("Cannot resume without boundary checkpoint thread_id.")
+        config = self._thread_config(thread_id)
+        resume_payload = human_resume.model_dump(mode="python") if hasattr(human_resume, "model_dump") else dict(human_resume or {})
+        try:
+            graph = await self._ensure_persistent_graph()
+            async for event in self._stream_graph_events(graph, Command(resume=resume_payload), config):
+                yield event
+        finally:
+            await self._close_checkpointer()
 
-        resume_graph = self._build_graph(entry_point=next_node)
-        self._emit_progress("workflow", "resume", f"resume request {effective_request.request_id} from {next_node}", resume_state)
-        result = await resume_graph.ainvoke(state_snapshot)
-        result["resume_mode"] = "boundary"
-        result["resume_state"] = resume_state
-        self._emit_progress("workflow", "done", f"resumed workflow finished with status={result.get('status', 'UNKNOWN')}", result)
-        return result
+    async def _stream_graph_events(self, graph: Any, graph_input: Any, config: dict[str, Any]):
+        last_state: dict[str, Any] = {}
+        stream = graph.astream(graph_input, config=config, stream_mode=["updates", "messages"]).__aiter__()
+        while True:
+            try:
+                chunk = await self._await_graph_result(
+                    stream.__anext__(),
+                    request_id=str(config.get("configurable", {}).get("thread_id", "")),
+                    operation="Workflow stream",
+                )
+            except StopAsyncIteration:
+                break
+            mode, data = chunk if isinstance(chunk, tuple) and len(chunk) == 2 else ("updates", chunk)
+            if mode == "messages":
+                message = data[0] if isinstance(data, tuple) else data
+                content = getattr(message, "content", None)
+                if content:
+                    yield {"event": "message", "data": {"content": content}}
+                continue
+            if mode != "updates" or not isinstance(data, dict):
+                continue
+            if "__interrupt__" in data:
+                last_state["__interrupt__"] = data["__interrupt__"]
+                yield {"event": "progress", "data": {"node": "__interrupt__", "status": "HUMAN_INTERVENE"}}
+                continue
+            for node_name, update in data.items():
+                if isinstance(update, dict):
+                    last_state.update(update)
+                    payload = {"node": node_name}
+                    if "status" in update:
+                        payload["status"] = update["status"]
+                    if "question" in update:
+                        payload["question"] = update["question"]
+                    yield {"event": "progress", "data": payload}
+        snapshot = await graph.aget_state(config)
+        result = dict(getattr(snapshot, "values", None) or last_state)
+        if last_state.get("__interrupt__"):
+            result["__interrupt__"] = last_state["__interrupt__"]
+        result = await self._normalize_interrupt_result(result, config)
+        self._emit_progress("workflow", "done", f"workflow finished with status={result.get('status', 'UNKNOWN')}", result)
+        yield {"event": "result", "data": result}
 
     async def _node_preflight(self, state: SystemState) -> dict[str, Any]:
         self._emit_progress("shangshu_preflight", "start", "run preflight checks")
@@ -160,7 +259,13 @@ class ProvinceWorkflow:
         question = self._preflight_question(request)
         if question:
             context.pending_user_inputs.append(question)
-            result = {"context": context, "status": "HUMAN_INTERVENE", "question": question}
+            result = {
+                "context": context,
+                "status": "HUMAN_INTERVENE",
+                "question": question,
+                "resume_mode": "boundary",
+                "resume_state": self._boundary_resume_state(context.request_id, question, ["interrupt_preflight"]),
+            }
             self._emit_progress("shangshu_preflight", "done", "preflight requires user input", result)
             return result
         result = {"context": context, "status": "RUNNING"}
@@ -168,7 +273,23 @@ class ProvinceWorkflow:
         return result
 
     def _route_after_preflight(self, state: SystemState) -> str:
-        return "finish_human_intervene" if state.get("status") == "HUMAN_INTERVENE" else "zhongshu_itinerary"
+        return "interrupt_preflight" if state.get("status") == "HUMAN_INTERVENE" else "zhongshu_itinerary"
+
+    async def _node_interrupt_preflight(self, state: SystemState) -> dict[str, Any]:
+        context = state["context"]
+        question = state.get("question") or "Please provide the missing trip details."
+        answer = interrupt({"question": question, "request_id": context.request_id, "mode": "boundary"})
+        request = self._apply_resume_payload(state["request"], answer)
+        context.user_request = request
+        context.pending_user_inputs = [item for item in context.pending_user_inputs if item != question]
+        return {
+            "request": request,
+            "context": context,
+            "status": "RUNNING",
+            "question": "",
+            "resume_mode": "none",
+            "resume_state": {},
+        }
 
     def _route_after_zhongshu(self, state: SystemState) -> str:
         return "finish_rejected" if state.get("status") == "ZHONGSHU_FAILED" else "menxia_review"
@@ -209,7 +330,13 @@ class ProvinceWorkflow:
         verdict = review_packet["verdict"]
         if verdict == "HUMAN_INTERVENE":
             question = (review_packet.get("human_questions") or ["Review requires user input."])[0]
-            result = {"context": context, "status": "HUMAN_INTERVENE", "question": question}
+            result = {
+                "context": context,
+                "status": "HUMAN_INTERVENE",
+                "question": question,
+                "resume_mode": "boundary",
+                "resume_state": self._boundary_resume_state(context.request_id, question, ["interrupt_review"]),
+            }
             self._emit_progress("shangshu_review_gate", "done", "review requested user input", result)
             return result
         if verdict == "REJECTED":
@@ -238,12 +365,41 @@ class ProvinceWorkflow:
 
     def _route_after_review(self, state: SystemState) -> str:
         if state.get("status") == "HUMAN_INTERVENE":
-            return "finish_human_intervene"
+            return "interrupt_review"
         if state.get("status") == "RETRY_ZHONGSHU":
             return "retry_zhongshu"
         if state.get("status") == "REJECTED":
             return "finish_rejected"
         return "shangshu_dispatch_liubu"
+
+    async def _node_interrupt_review(self, state: SystemState) -> dict[str, Any]:
+        context = state["context"]
+        question = state.get("question") or "Review requires user input."
+        answer = interrupt({"question": question, "request_id": context.request_id, "mode": "boundary"})
+        request = self._apply_resume_payload(state["request"], answer)
+        context.user_request = request
+        context.pending_user_inputs = [item for item in context.pending_user_inputs if item != question]
+        follow_up_payload = {
+            "request_id": context.request_id,
+            "draft": state.get("draft_packet", {}),
+            "review_feedback": state.get("review_packet", {}),
+            "user_request": request,
+            "human_resume": answer,
+            "governance": {
+                "source_state": WorkflowState.HUMAN_INTERVENE.value,
+                "human_intervened": True,
+                "retry_allowed": True,
+            },
+        }
+        return {
+            "request": request,
+            "context": context,
+            "status": "RETRY_ZHONGSHU",
+            "zhongshu_task_payload": follow_up_payload,
+            "question": "",
+            "resume_mode": "none",
+            "resume_state": {},
+        }
 
     async def _node_dispatch_liubu(self, state: SystemState) -> dict[str, Any]:
         self._emit_progress("shangshu_dispatch_liubu", "start", "dispatch tasks to bureaus")
@@ -337,7 +493,7 @@ class ProvinceWorkflow:
     ) -> dict[str, Any]:
         self._emit_progress(node_name, "start", running_message)
         try:
-            result = await run_bureau(state["payload"])
+            result = await run_bureau(self._liubu_subtask(state["payload"], role))
             phase = "done"
             message = returned_message
         except Exception as exc:
@@ -348,6 +504,9 @@ class ProvinceWorkflow:
         update = {"execution_results": {role.value: result}}
         self._emit_progress(node_name, phase, message, update)
         return update
+
+    def _liubu_subtask(self, payload: dict[str, Any], role: AgentRole) -> dict[str, Any]:
+        return {"worker_input": normalize_worker_input(payload, role.value)}
 
     def _fallback_weather_result(self, payload: dict[str, Any], exc: Exception) -> dict[str, Any]:
         return {
@@ -419,79 +578,87 @@ class ProvinceWorkflow:
 
     async def _node_finish_human(self, state: SystemState) -> dict[str, Any]:
         question = state.get("question") or "Review requires user input."
-        resume_state = self._build_resume_state(state, question)
         result = {
             "context": state.get("context"),
             "status": "HUMAN_INTERVENE",
             "question": question,
             "resume_mode": "boundary",
-            "resume_state": resume_state,
+            "resume_state": self._boundary_resume_state(
+                (state.get("context").request_id if state.get("context") else state.get("request", {}).get("request_id", "")),
+                question,
+                ["finish_human_intervene"],
+            ),
         }
         self._emit_progress("finish_human_intervene", "done", "workflow waiting for human input", result)
         return result
 
-    def _build_resume_state(self, state: SystemState, question: str) -> dict[str, Any]:
-        snapshot: dict[str, Any] = {}
-        for key in ("request", "draft_packet", "review_packet", "zhongshu_task_payload", "execution_results"):
-            if key in state:
-                snapshot[key] = state[key]
-        context = state.get("context")
-        if isinstance(context, ShangshuWorkflowContext):
-            snapshot["context"] = self._serialize_context(context)
+    def _thread_config(self, request_id: str) -> dict[str, Any]:
+        return {"configurable": {"thread_id": request_id}}
+
+    async def _await_graph_result(self, awaitable: Awaitable[Any], *, request_id: str, operation: str) -> Any:
+        timeout_seconds = get_settings().plan_request_timeout_seconds
+        try:
+            return await asyncio.wait_for(awaitable, timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            message = f"{operation} timed out request_id={request_id} timeout_seconds={timeout_seconds}"
+            logger.error(message)
+            self._emit_progress("workflow", "error", message)
+            raise
+
+    async def _normalize_interrupt_result(self, result: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+        interrupts = result.get("__interrupt__") or []
+        if not interrupts:
+            return result
+        graph = await self._ensure_persistent_graph()
+        snapshot = await graph.aget_state(config)
+        interrupt_value = getattr(interrupts[0], "value", {}) if interrupts else {}
+        question = interrupt_value.get("question") if isinstance(interrupt_value, dict) else str(interrupt_value)
+        state_values = dict(snapshot.values or {})
+        context = state_values.get("context")
+        request_id = getattr(context, "request_id", None) or state_values.get("request", {}).get("request_id", config["configurable"]["thread_id"])
+        state_values.update(
+            {
+                "status": "HUMAN_INTERVENE",
+                "question": question,
+                "resume_mode": "boundary",
+                "resume_state": self._boundary_resume_state(
+                    str(request_id),
+                    str(question),
+                    list(snapshot.next or []),
+                    interrupt_id=getattr(interrupts[0], "id", None),
+                ),
+            }
+        )
+        return state_values
+
+    def _boundary_resume_state(
+        self,
+        request_id: str,
+        question: str,
+        next_nodes: list[str],
+        *,
+        interrupt_id: str | None = None,
+    ) -> dict[str, Any]:
         return {
             "mode": "boundary",
-            "next_node": "zhongshu_itinerary",
-            "state": snapshot,
+            "thread_id": request_id,
+            "interrupt_id": interrupt_id,
             "question": question,
+            "next": next_nodes,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    def _serialize_context(self, context: ShangshuWorkflowContext) -> dict[str, Any]:
-        return {
-            "request_id": context.request_id,
-            "user_request": context.user_request,
-            "dashboard_base_url": context.dashboard_base_url,
-            "current_state": context.current_state.value,
-            "draft_payload": context.draft_payload,
-            "review_payload": context.review_payload,
-            "execution_results": context.execution_results,
-            "quality_gate_results": context.quality_gate_results,
-            "progress_events": context.progress_events,
-            "pending_user_inputs": context.pending_user_inputs,
-            "assembled_output": context.assembled_output,
-            "rejection_count": context.rejection_count,
-            "max_rejection_rounds": context.max_rejection_rounds,
-        }
-
-    def _deserialize_context(self, payload: dict[str, Any]) -> ShangshuWorkflowContext:
-        current_state = WorkflowState(payload.get("current_state") or WorkflowState.DRAFT.value)
-        context = ShangshuWorkflowContext(
-            request_id=payload["request_id"],
-            user_request=payload.get("user_request", {}),
-            dashboard_base_url=payload.get("dashboard_base_url", "http://127.0.0.1:8000/dashboard"),
-            current_state=current_state,
-            draft_payload=payload.get("draft_payload"),
-            review_payload=payload.get("review_payload"),
-            execution_results=dict(payload.get("execution_results") or {}),
-            quality_gate_results=dict(payload.get("quality_gate_results") or {}),
-            progress_events=list(payload.get("progress_events") or []),
-            pending_user_inputs=list(payload.get("pending_user_inputs") or []),
-            assembled_output=payload.get("assembled_output"),
-            rejection_count=int(payload.get("rejection_count") or 0),
-            max_rejection_rounds=int(payload.get("max_rejection_rounds") or 2),
-        )
-        self.orchestrator._machines[context.request_id] = TravelWorkflowStateMachine(current_state=current_state)
-        return context
-
-    def _merge_request_for_resume(self, request: PlanningRequest, human_resume: Any) -> PlanningRequest:
-        payload = human_resume.model_dump(mode="python") if hasattr(human_resume, "model_dump") else dict(human_resume or {})
-        data = request.model_dump(mode="python")
-        profile = dict(data["profile"])
-        profile.update(payload.get("profile_updates") or {})
-        data["profile"] = profile
-        if payload.get("user_message"):
-            data["user_message"] = payload["user_message"]
-        return PlanningRequest.model_validate(data)
+    def _apply_resume_payload(self, request: dict[str, Any], payload: Any) -> dict[str, Any]:
+        data = copy.deepcopy(request)
+        resume = payload if isinstance(payload, dict) else {}
+        profile_updates = resume.get("profile_updates") or {}
+        if profile_updates:
+            profile = dict(data.get("profile") or {})
+            profile.update(profile_updates)
+            data["profile"] = profile
+        if resume.get("user_message"):
+            data["user_message"] = resume["user_message"]
+        return PlanningRequest.model_validate(data).model_dump(mode="json")
 
     async def _node_finish_rejected(self, state: SystemState) -> dict[str, Any]:
         error_msg = state.get("error", "未知错误")

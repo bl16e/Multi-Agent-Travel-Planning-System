@@ -1,11 +1,16 @@
 import pytest
 
 import utils.agent_runtime as agent_runtime
+from provinces.liubu.constrained.state import normalize_worker_input
 from provinces.liubu.flight_transport.service import FlightTransportBureau
 from provinces.liubu.accommodation.service import AccommodationBureau
 from provinces.liubu.budget.service import BudgetBureau
 from utils.schemas import ItineraryDraftModel
 from workflow import build_markdown
+
+
+def _liubu_subtask(payload: dict, bureau: str) -> dict:
+    return {"worker_input": normalize_worker_input(payload, bureau)}
 
 
 @pytest.mark.asyncio
@@ -27,7 +32,7 @@ async def test_flight_transport_fallback_is_marked_as_estimated():
         },
     }
 
-    result = await bureau.run(payload)
+    result = await bureau.run(_liubu_subtask(payload, "FLIGHT_TRANSPORT"))
 
     assert result["bureau"] == "FLIGHT_TRANSPORT"
     assert all(option["airline"] != "Placeholder Air" for option in result["flight_options"])
@@ -56,7 +61,7 @@ async def test_flight_transport_fallback_uses_trip_date_when_profile_start_date_
         },
     }
 
-    result = await bureau.run(payload)
+    result = await bureau.run(_liubu_subtask(payload, "FLIGHT_TRANSPORT"))
 
     assert all("TBD" not in option["departure_time"] for option in result["flight_options"])
     assert all(option["departure_time"].startswith("2026-05-01") for option in result["flight_options"])
@@ -87,7 +92,7 @@ async def test_accommodation_fallback_uses_trip_night_count():
         },
     }
 
-    result = await bureau.run(payload)
+    result = await bureau.run(_liubu_subtask(payload, "ACCOMMODATION"))
 
     first_hotel = result["hotel_options"][0]
     assert first_hotel["nightly_rate"] == 140
@@ -116,8 +121,7 @@ def test_offline_zhongshu_draft_has_provenance_and_no_generic_placeholders():
 
 @pytest.mark.asyncio
 async def test_liubu_fallback_outputs_expose_status_and_data_source():
-    result = await BudgetBureau().run(
-        {
+    payload = {
             "approved_draft": {
                 "destination": "Kyoto",
                 "itinerary_draft": {
@@ -134,7 +138,7 @@ async def test_liubu_fallback_outputs_expose_status_and_data_source():
                 }
             },
         }
-    )
+    result = await BudgetBureau().run(_liubu_subtask(payload, "BUDGET"))
 
     assert result["bureau"] == "BUDGET"
     assert result["status"] == "fallback"

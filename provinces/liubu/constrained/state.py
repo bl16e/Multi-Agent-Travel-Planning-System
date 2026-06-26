@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Annotated, Any, Literal, TypedDict
 
@@ -46,7 +46,6 @@ class LiubuWorkerState(TypedDict, total=False):
     payload: dict[str, Any]
     worker_input: LiubuWorkerInput
     messages: Annotated[list[Any], add_messages]
-    tool_requests: list[dict[str, Any]]
     tool_evidence: list[dict[str, Any]]
     tool_step_count: int
     validation_findings: list[dict[str, Any]]
@@ -115,3 +114,4 @@ def _bureau_task_for(approved_draft: dict[str, Any], bureau: str) -> dict[str, A
 def _first_destination_preference(profile: dict[str, Any]) -> str:
     preferences = profile.get("destination_preferences") or []
     return str(preferences[0]) if preferences else "Unknown Destination"
+

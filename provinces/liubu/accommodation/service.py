@@ -3,124 +3,86 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 from urllib.parse import quote_plus
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, StateGraph
-from langgraph.prebuilt import tools_condition
 
 from provinces.liubu.constrained.gates import gate_accommodation_result, result_passed_gate
-from provinces.liubu.constrained.state import LiubuToolEvidence, LiubuWorkerState, normalize_worker_input
-from provinces.liubu.constrained.tool_node import load_constrained_mcp_tools, run_constrained_tool_node
-from utils.agent_runtime import escape_prompt_template_text, run_react_mcp_task, soul_path_for
+from provinces.liubu.constrained.state import LiubuToolEvidence, LiubuWorkerInput, LiubuWorkerState
+from provinces.liubu.official_tooling import EvidenceToolNode, bind_tools_if_available, invoke_bound_tool_model, load_allowed_liubu_tools, run_tool_node_collect_evidence
+from utils.agent_runtime import escape_prompt_template_text, soul_path_for
 from utils.schemas import AccommodationExecutionResult
 from utils.llm_factory import build_qwen_chat
 from utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS: float | None = None
-ACCOMMODATION_ALLOWED_TOOLS = {"google_hotels", "google_maps", "search_poi", "nearby_search", "amap_place_search"}
-MAX_TOOL_STEPS = 3
-
-
-class AccommodationState(TypedDict, total=False):
-    payload: dict[str, Any]
-    destination: str
-    profile: dict[str, Any]
-    daily_plan: list[dict[str, Any]]
-    research_notes: str
-    result: dict[str, Any]
+ACCOMMODATION_ALLOWED_TOOLS = {"search_google_hotels"}
+ACCOMMODATION_TOOL_SERVERS = ["serpapi"]
 
 
 class AccommodationBureau:
     def __init__(self) -> None:
         self.soul_path = soul_path_for(__file__)
+        self.tool_node = EvidenceToolNode([], collector=run_tool_node_collect_evidence)
+        self.bound_tool_model = None
+        self._tooling_ready = False
         self.graph = self._build_graph()
 
-    async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        result = await self.graph.ainvoke({"payload": payload})
+    async def run(self, subtask: dict[str, Any]) -> dict[str, Any]:
+        await self.ensure_live_tooling()
+        result = await self.graph.ainvoke(dict(subtask))
         return result["result"]
+
+    async def ensure_live_tooling(self) -> None:
+        if self._tooling_ready:
+            return
+        tools = await load_allowed_liubu_tools(ACCOMMODATION_TOOL_SERVERS, ACCOMMODATION_ALLOWED_TOOLS)
+        self.tool_node = EvidenceToolNode(tools, collector=run_tool_node_collect_evidence)
+        self.bound_tool_model = bind_tools_if_available(build_qwen_chat(), tools)
+        self.graph = self._build_graph()
+        self._tooling_ready = True
 
     def _build_graph(self):
         graph = StateGraph(LiubuWorkerState)
-        graph.add_node("prepare_context", self.prepare_context)
-        graph.add_node("agent_reasoning", self.agent_reasoning)
-        graph.add_node("tool_execution", self.tool_execution)
-        graph.add_node("structured_result", self.structured_result)
+        graph.add_node("agent", self.agent)
+        graph.add_node("tools", self.tool_node)
         graph.add_node("quality_gate", self.quality_gate)
-        graph.set_entry_point("prepare_context")
-        graph.add_edge("prepare_context", "agent_reasoning")
-        graph.add_conditional_edges("agent_reasoning", self._route_after_reasoning, {"tool_execution": "tool_execution", "structured_result": "structured_result"})
-        graph.add_conditional_edges("tool_execution", self._route_after_tools, {"agent_reasoning": "agent_reasoning", "structured_result": "structured_result"})
-        graph.add_edge("structured_result", "quality_gate")
+        graph.set_entry_point("agent")
+        graph.add_conditional_edges("agent", self._route_after_agent, {"tools": "tools", "quality_gate": "quality_gate"})
+        graph.add_edge("tools", "agent")
         graph.add_edge("quality_gate", END)
         return graph.compile()
 
-    async def prepare_context(self, state: LiubuWorkerState) -> dict[str, Any]:
-        worker_input = normalize_worker_input(state["payload"], "ACCOMMODATION")
-        return {
-            "worker_input": worker_input,
-            "messages": [HumanMessage(content=self._research_prompt(worker_input))],
-            "tool_evidence": [],
-            "tool_step_count": 0,
-            "validation_findings": [],
-            "warnings": [],
-        }
-
-    async def agent_reasoning(self, state: LiubuWorkerState) -> dict[str, Any]:
+    async def agent(self, state: LiubuWorkerState) -> dict[str, Any]:
+        worker_input = self._worker_input(state)
         injected_reasoner = getattr(self, "_agent_reasoning", None)
-        if injected_reasoner is not None:
-            update = await injected_reasoner(state)
-            if "tool_requests" in update:
-                return {"messages": [AIMessage(content="", tool_calls=[self._tool_request_to_call(item, index) for index, item in enumerate(update["tool_requests"])])]}
-            return update
-        if state.get("tool_evidence"):
-            return {"messages": [AIMessage(content="Accommodation tool evidence collected.")]}
-        worker_input = state["worker_input"]
-        tools = await load_constrained_mcp_tools(worker_input, ["amap", "serpapi"], ACCOMMODATION_ALLOWED_TOOLS)
-        llm = build_qwen_chat()
-        if llm and tools:
-            response = await llm.bind_tools(tools).ainvoke(state.get("messages", []))
-            return {"messages": [response]}
-        constraints = worker_input.constraints
-        return {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "google_hotels",
-                            "args": {
-                                "q": f"{worker_input.destination} hotels",
-                                "check_in_date": constraints["start_date"],
-                                "check_out_date": constraints["end_date"],
-                                "adults": constraints["adults"],
-                                "currency": constraints["currency"],
-                            },
-                            "id": "accommodation_call_1",
-                            "type": "tool_call",
-                        }
-                    ],
-                )
-            ]
-        }
-
-    async def tool_execution(self, state: LiubuWorkerState) -> dict[str, Any]:
-        worker_input = state["worker_input"]
-        existing = [LiubuToolEvidence.model_validate(item) for item in state.get("tool_evidence", [])]
-        tools = await load_constrained_mcp_tools(worker_input, ["amap", "serpapi"], ACCOMMODATION_ALLOWED_TOOLS)
-        tool_messages, evidence = await run_constrained_tool_node(messages=state.get("messages", []), tools=tools)
-        existing.extend(evidence)
-        return {
-            "messages": tool_messages,
-            "tool_evidence": [item.model_dump(mode="json") for item in existing],
-            "tool_step_count": int(state.get("tool_step_count") or 0) + 1,
-        }
-
-    async def structured_result(self, state: LiubuWorkerState) -> dict[str, Any]:
-        worker_input = state["worker_input"]
+        if injected_reasoner is not None and int(state.get("tool_step_count") or 0) == 0:
+            return await injected_reasoner(state)
+        if self.bound_tool_model is not None and int(state.get("tool_step_count") or 0) == 0:
+            tool_message = await invoke_bound_tool_model(
+                self.bound_tool_model,
+                [
+                    HumanMessage(
+                        content=(
+                            "Search live hotel options. "
+                            f"query={worker_input.destination} hotel; "
+                            f"check_in_date={worker_input.constraints.get('start_date')}; "
+                            f"check_out_date={worker_input.constraints.get('end_date')}; "
+                            f"adults={worker_input.constraints.get('adults')}; "
+                            f"currency={worker_input.constraints.get('currency')}"
+                        )
+                    )
+                ],
+                bureau=worker_input.bureau,
+                request_id=worker_input.request_id,
+                destination=worker_input.destination,
+            )
+            if getattr(tool_message, "tool_calls", None):
+                return {"worker_input": worker_input, "messages": [tool_message]}
         evidence = [LiubuToolEvidence.model_validate(item) for item in state.get("tool_evidence", [])]
         live_notes = [str(item.result) for item in evidence if item.status == "ok"]
         research_notes = "\n".join(live_notes) if live_notes else "; ".join(item.error or item.status for item in evidence) or "No successful live hotel evidence."
@@ -134,13 +96,31 @@ class AccommodationBureau:
         )
         payload = result["result"]
         if live_notes:
+            payload["status"] = "ok"
             payload["data_source"] = "live"
         payload["liubu_evidence"] = [item.model_dump(mode="json") for item in evidence]
-        return {"result": payload}
+        return {
+            "worker_input": worker_input,
+            "tool_evidence": [item.model_dump(mode="json") for item in evidence],
+            "messages": [
+                AIMessage(
+                    content=(
+                        "No live accommodation ToolNode evidence was available; using synthesis or fallback."
+                    )
+                )
+            ],
+            "result": payload,
+        }
+
+    async def tools(self, state: LiubuWorkerState) -> dict[str, Any]:
+        return {
+            "tool_evidence": list(state.get("tool_evidence", [])),
+            "tool_step_count": int(state.get("tool_step_count") or 0) + 1,
+        }
 
     async def quality_gate(self, state: LiubuWorkerState) -> dict[str, Any]:
         evidence = [LiubuToolEvidence.model_validate(item) for item in state.get("tool_evidence", [])]
-        findings = gate_accommodation_result(state["worker_input"], state["result"], evidence)
+        findings = gate_accommodation_result(self._worker_input(state), state["result"], evidence)
         passed = result_passed_gate(findings)
         result = dict(state["result"])
         result["liubu_quality"] = {"passed": passed, "findings": [item.model_dump(mode="json") for item in findings]}
@@ -151,54 +131,15 @@ class AccommodationBureau:
             result["warnings"].extend(item.message for item in findings)
         return {"result": result, "validation_findings": [item.model_dump(mode="json") for item in findings]}
 
-    def _route_after_reasoning(self, state: LiubuWorkerState) -> str:
-        if int(state.get("tool_step_count") or 0) >= MAX_TOOL_STEPS:
-            return "structured_result"
-        return "tool_execution" if tools_condition(state) == "tools" else "structured_result"
+    def _route_after_agent(self, state: LiubuWorkerState) -> str:
+        messages = state.get("messages") or []
+        last_message = messages[-1] if messages else None
+        return "tools" if getattr(last_message, "tool_calls", None) else "quality_gate"
 
-    def _route_after_tools(self, state: LiubuWorkerState) -> str:
-        return "structured_result" if int(state.get("tool_step_count") or 0) >= MAX_TOOL_STEPS else "agent_reasoning"
+    def _worker_input(self, state: LiubuWorkerState) -> LiubuWorkerInput:
+        return LiubuWorkerInput.model_validate(state["worker_input"])
 
-    def _research_prompt(self, worker_input) -> str:
-        return (
-            f"Research booking-ready accommodation options in {worker_input.destination}. "
-            f"Use only the bound tools when live hotel data is needed. "
-            f"Hard constraints: {worker_input.constraints}. Return concise evidence before final synthesis."
-        )
-
-    def _tool_request_to_call(self, request: dict[str, Any], index: int) -> dict[str, Any]:
-        return {
-            "name": str(request.get("tool") or ""),
-            "args": dict(request.get("args") or {}),
-            "id": f"legacy_accommodation_tool_call_{index + 1}",
-            "type": "tool_call",
-        }
-
-    async def ingest(self, state: AccommodationState) -> dict[str, Any]:
-        payload = state["payload"]
-        approved_draft = payload.get("approved_draft", {})
-        execution_plan = payload.get("execution_plan", {})
-        user_request = execution_plan.get("user_request", {})
-        draft = approved_draft.get("itinerary_draft", {})
-        return {
-            "destination": approved_draft.get("destination") or draft.get("destination") or "Unknown Destination",
-            "profile": user_request.get("profile", {}),
-            "daily_plan": draft.get("daily_plan", []),
-        }
-
-    async def research_accommodation(self, state: AccommodationState) -> dict[str, Any]:
-        notes = await run_react_mcp_task(
-            soul_path=self.soul_path,
-            server_names=["amap", "serpapi"],
-            user_task=(
-                f"Find practical areas and hotel options in {state['destination']}. "
-                f"Traveler profile: {state.get('profile', {})}. "
-                "Use google_maps, google_hotels, search_poi, and nearby_search when available. Return concise notes about districts, hotel candidates, transport convenience, and booking caveats."
-            ),
-        )
-        return {"research_notes": notes}
-
-    async def synthesize_accommodation(self, state: AccommodationState) -> dict[str, Any]:
+    async def synthesize_accommodation(self, state: dict[str, Any]) -> dict[str, Any]:
         llm = build_qwen_chat()
         if llm:
             try:

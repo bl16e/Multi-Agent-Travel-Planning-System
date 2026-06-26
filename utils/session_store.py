@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from json import JSONDecodeError
@@ -20,7 +20,7 @@ class StoredSession(BaseModel):
     result: dict[str, Any] = Field(default_factory=dict)
     package: dict[str, Any] | None = None
     resume_state: dict[str, Any] = Field(default_factory=dict)
-    resume_mode: Literal["none", "boundary", "replay"] = "none"
+    resume_mode: Literal["none", "boundary"] = "none"
 
 
 class SessionStore(Protocol):

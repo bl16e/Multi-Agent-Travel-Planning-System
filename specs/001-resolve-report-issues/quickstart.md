@@ -1,4 +1,4 @@
-# Quickstart: Resolve Reported Workflow Issues
+﻿# Quickstart: Resolve Reported Workflow Issues
 
 This guide defines validation scenarios for the report-closure feature. It is a
 run guide, not an implementation task list.
@@ -21,8 +21,12 @@ run guide, not an implementation task list.
 
    - `SESSION_CACHE_MAX_ENTRIES=500`
    - `SESSION_CACHE_TTL_SECONDS=86400`
+   - `LANGGRAPH_CHECKPOINT_DB=artifacts/langgraph_checkpoints.sqlite`
    - `ENABLE_LANGGRAPH_INTERRUPTS=0`
    - `QWEN_TIMEOUT_SECONDS=60`
+   - `PLAN_REQUEST_TIMEOUT_SECONDS=300`
+   - `MCP_TOOLING_TIMEOUT_SECONDS=30`
+   - `LIUBU_TOOL_TIMEOUT_SECONDS=30`
    - `RUN_LIVE_TESTS=0`
 
 3. For live validation, set provider credentials and enable live tests:
@@ -45,7 +49,8 @@ Expected outcome:
 - A representative planning workflow completes as `DONE`, `HUMAN_INTERVENE`,
   or `REJECTED` without an unhandled exception.
 - API routes return structured statuses/errors.
-- Streaming endpoints emit `progress`, `result` or `error`, and `done`.
+- Streaming endpoints return `text/event-stream` with `progress`, `result`,
+  `error`, and `done` events.
 - Streaming and non-streaming routes report equivalent final status semantics
   for successful, human-intervention, and error outcomes.
 - Invalid trip date ranges are rejected before workflow execution with a clear
@@ -56,15 +61,17 @@ Expected outcome:
 Run the targeted suite after implementation:
 
 ```bash
-python -m pytest tests/test_session_cache.py tests/test_resume_flow.py tests/test_main_api.py tests/test_workflow.py tests/test_orchestrator.py tests/test_zhongshu.py tests/test_menxia.py tests/test_agent_runtime.py tests/test_bureaus.py tests/test_offline_fallbacks.py tests/test_live_config.py tests/test_docs_examples.py -q
+python -m pytest tests/test_session_cache.py tests/test_resume_flow.py tests/test_main_api.py tests/test_workflow.py tests/test_orchestrator.py tests/test_zhongshu.py tests/test_menxia.py tests/test_agent_runtime.py tests/test_bureaus.py tests/test_offline_fallbacks.py tests/test_live_config.py tests/test_docs_examples.py tests/test_official_cleanup.py -q
 ```
 
 Expected outcome:
 
 - Runtime sessions evict after 500 entries or 24-hour TTL while persisted
   sessions remain available.
-- New human-intervention sessions resume from boundary state.
-- Legacy/incompatible sessions label replay behavior.
+- New human-intervention sessions expose `resume_mode=boundary` metadata and
+  resume through LangGraph checkpointers with `Command(resume=...)`.
+- Legacy replay behavior has been removed; sessions without boundary checkpoint
+  metadata return a conflict instead of replaying product logic.
 - Generic placeholder itinerary drafts are rejected before final package
   approval.
 - Invalid Liubu dispatch, missing destination, invalid dates, corrupt sessions,

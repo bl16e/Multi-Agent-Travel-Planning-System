@@ -1,14 +1,57 @@
-import pytest
+﻿import pytest
 from langgraph.types import Send
 
 from workflow import ProvinceWorkflow, merge_dicts
-from utils.permission_matrix import AgentRole
+from utils.schemas import AgentRole
 from utils.schemas import PlanningRequest, TravelerProfile
 
 
 class RaisingBureau:
     async def run(self, payload):
         raise KeyError("boom")
+
+
+@pytest.mark.asyncio
+async def test_workflow_stream_uses_langgraph_astream(monkeypatch):
+    workflow = ProvinceWorkflow()
+    request = PlanningRequest(
+        request_id="stream_uses_astream",
+        user_message="Test trip to Tokyo",
+        profile=TravelerProfile(
+            destination_preferences=["Tokyo"],
+            origin_city="Beijing",
+            start_date="2026-05-01",
+            end_date="2026-05-03",
+            total_budget=5000,
+        ),
+    )
+    called = {"astream": False}
+
+    class FakeGraph:
+        async def astream(self, graph_input, config=None, stream_mode=None):
+            called["astream"] = True
+            assert stream_mode == ["updates", "messages"]
+            yield ("updates", {"shangshu_preflight": {"status": "RUNNING"}})
+            yield ("updates", {"finish_rejected": {"status": "REJECTED", "rejected_payload": {"status": "REJECTED", "request_id": request.request_id}}})
+
+        async def aget_state(self, config):
+            return type("Snapshot", (), {"values": {"status": "REJECTED", "rejected_payload": {"status": "REJECTED", "request_id": request.request_id}}, "next": (), "interrupts": ()})()
+
+    async def fake_ensure():
+        return FakeGraph()
+
+    async def fake_close():
+        return None
+
+    monkeypatch.setattr(workflow, "_ensure_persistent_graph", fake_ensure)
+    monkeypatch.setattr(workflow, "_close_checkpointer", fake_close)
+
+    events = [event async for event in workflow.stream_run(request)]
+
+    assert called["astream"] is True
+    assert any(event["event"] == "progress" for event in events)
+    assert events[-1]["event"] == "result"
+    assert events[-1]["data"]["status"] == "REJECTED"
 
 
 @pytest.mark.asyncio
@@ -174,10 +217,10 @@ def test_liubu_fanout_uses_independent_context_snapshots_and_merges_only_results
 
 
 @pytest.mark.asyncio
-async def test_finish_human_creates_boundary_resume_state():
+async def test_finish_human_creates_boundary_resume_metadata():
     workflow = ProvinceWorkflow()
     request = PlanningRequest(
-        request_id="resume_boundary",
+        request_id="resume_placeholder",
         user_message="Test trip to Tokyo",
         profile=TravelerProfile(
             destination_preferences=["Tokyo"],
@@ -202,7 +245,5 @@ async def test_finish_human_creates_boundary_resume_state():
     assert result["status"] == "HUMAN_INTERVENE"
     assert result["resume_mode"] == "boundary"
     assert result["resume_state"]["mode"] == "boundary"
-    assert result["resume_state"]["next_node"] == "zhongshu_itinerary"
+    assert result["resume_state"]["thread_id"] == "resume_placeholder"
     assert result["resume_state"]["question"] == "Need budget"
-    assert result["resume_state"]["state"]["request"]["request_id"] == "resume_boundary"
-    assert result["resume_state"]["state"]["context"]["request_id"] == "resume_boundary"

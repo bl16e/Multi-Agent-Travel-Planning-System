@@ -4,68 +4,139 @@ import asyncio
 import logging
 from pathlib import Path
 from math import ceil
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 
+from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
 
-from utils.agent_runtime import escape_prompt_template_text, run_react_mcp_task, soul_path_for
+from provinces.liubu.constrained.state import LiubuWorkerInput
+from provinces.liubu.official_tooling import EvidenceToolNode, bind_tools_if_available, invoke_bound_tool_model, load_allowed_liubu_tools, run_tool_node_collect_evidence
+from utils.agent_runtime import escape_prompt_template_text, soul_path_for
 from utils.schemas import BudgetExecutionResult
 from utils.llm_factory import build_qwen_chat
 from utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS: float | None = None
+BUDGET_ALLOWED_TOOLS = {"search_google_travel", "search_google_hotels", "search_google_flights"}
+BUDGET_TOOL_SERVERS = ["serpapi"]
 
 
 class BudgetState(TypedDict, total=False):
-    payload: dict[str, Any]
+    worker_input: LiubuWorkerInput | dict[str, Any]
+    messages: Annotated[list[Any], add_messages]
     draft: dict[str, Any]
     profile: dict[str, Any]
     research_notes: str
+    tool_evidence: list[dict[str, Any]]
+    tool_step_count: int
     result: dict[str, Any]
 
 
 class BudgetBureau:
     def __init__(self) -> None:
         self.soul_path = soul_path_for(__file__)
+        self.tool_node = EvidenceToolNode([], collector=run_tool_node_collect_evidence)
+        self.bound_tool_model = None
+        self._tooling_ready = False
         self.graph = self._build_graph()
 
-    async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        result = await self.graph.ainvoke({"payload": payload})
+    async def run(self, subtask: dict[str, Any]) -> dict[str, Any]:
+        await self.ensure_live_tooling()
+        result = await self.graph.ainvoke(dict(subtask))
         return result["result"]
+
+    async def ensure_live_tooling(self) -> None:
+        if self._tooling_ready:
+            return
+        tools = await load_allowed_liubu_tools(BUDGET_TOOL_SERVERS, BUDGET_ALLOWED_TOOLS)
+        self.tool_node = EvidenceToolNode(tools, collector=run_tool_node_collect_evidence)
+        self.bound_tool_model = bind_tools_if_available(build_qwen_chat(), tools)
+        self.graph = self._build_graph()
+        self._tooling_ready = True
 
     def _build_graph(self):
         graph = StateGraph(BudgetState)
-        graph.add_node("ingest", self.ingest)
-        graph.add_node("research_budget", self.research_budget)
-        graph.add_node("synthesize_budget", self.synthesize_budget)
-        graph.set_entry_point("ingest")
-        graph.add_edge("ingest", "research_budget")
-        graph.add_edge("research_budget", "synthesize_budget")
-        graph.add_edge("synthesize_budget", END)
+        graph.add_node("agent", self.agent)
+        graph.add_node("tools", self.tool_node)
+        graph.add_node("quality_gate", self.quality_gate)
+        graph.set_entry_point("agent")
+        graph.add_conditional_edges("agent", self._route_after_agent, {"tools": "tools", "quality_gate": "quality_gate"})
+        graph.add_edge("tools", "agent")
+        graph.add_edge("quality_gate", END)
         return graph.compile()
 
-    async def ingest(self, state: BudgetState) -> dict[str, Any]:
-        payload = state["payload"]
-        approved_draft = payload.get("approved_draft", {})
-        execution_plan = payload.get("execution_plan", {})
-        user_request = execution_plan.get("user_request", {})
-        return {"draft": approved_draft.get("itinerary_draft", {}), "profile": user_request.get("profile", {})}
-
-    async def research_budget(self, state: BudgetState) -> dict[str, Any]:
-        destination = state["draft"].get("destination") or "destination"
-        notes = await run_react_mcp_task(
-            soul_path=self.soul_path,
-            server_names=["serpapi"],
-            user_task=(
-                f"Research practical trip cost context for {destination}. "
-                f"Traveler profile: {state.get('profile', {})}. "
-                f"Draft itinerary: {state.get('draft', {})}. "
-                "Use MCP tools when available and return concise notes about daily costs, accommodation budget level, and transport cost pressure."
-            ),
+    async def agent(self, state: BudgetState) -> dict[str, Any]:
+        worker_input = self._worker_input(state)
+        draft = dict(worker_input.approved_draft.get("itinerary_draft") or {})
+        if self.bound_tool_model is not None and int(state.get("tool_step_count") or 0) == 0:
+            tool_message = await invoke_bound_tool_model(
+                self.bound_tool_model,
+                [
+                    HumanMessage(
+                        content=(
+                            "Search live travel cost context. "
+                            f"destination={worker_input.destination}; "
+                            f"origin={worker_input.profile.get('origin_city')}; "
+                            f"start_date={worker_input.constraints.get('start_date')}; "
+                            f"end_date={worker_input.constraints.get('end_date')}; "
+                            f"adults={worker_input.constraints.get('adults')}; "
+                            f"currency={worker_input.constraints.get('currency')}"
+                        )
+                    )
+                ],
+                bureau=worker_input.bureau,
+                request_id=worker_input.request_id,
+                destination=worker_input.destination,
+            )
+            if getattr(tool_message, "tool_calls", None):
+                return {"worker_input": worker_input, "messages": [tool_message]}
+        evidence = list(state.get("tool_evidence", []) or [])
+        live_notes = [str(item.get("result")) for item in evidence if item.get("status") == "ok"]
+        research_notes = (
+            f"No live budget ToolNode evidence was available for {worker_input.destination}; "
+            "using structured synthesis or deterministic fallback."
         )
-        return {"research_notes": notes}
+        if live_notes:
+            research_notes = "\n".join(live_notes)
+        result = await self.synthesize_budget(
+            {
+                "draft": draft,
+                "profile": worker_input.profile,
+                "research_notes": research_notes,
+            }
+        )
+        payload = result["result"]
+        if live_notes:
+            payload["status"] = "ok"
+            payload["data_source"] = "live"
+        payload["liubu_evidence"] = evidence
+        return {
+            "draft": draft,
+            "profile": worker_input.profile,
+            "research_notes": research_notes,
+            "tool_evidence": evidence,
+            "result": payload,
+        }
+
+    async def tools(self, state: BudgetState) -> dict[str, Any]:
+        return {
+            "tool_evidence": list(state.get("tool_evidence", [])),
+            "tool_step_count": int(state.get("tool_step_count") or 0) + 1,
+        }
+
+    async def quality_gate(self, state: BudgetState) -> dict[str, Any]:
+        return {"result": state["result"]}
+
+    def _route_after_agent(self, state: BudgetState) -> str:
+        messages = state.get("messages") or []
+        last_message = messages[-1] if messages else None
+        return "tools" if getattr(last_message, "tool_calls", None) else "quality_gate"
+
+    def _worker_input(self, state: BudgetState) -> LiubuWorkerInput:
+        return LiubuWorkerInput.model_validate(state["worker_input"])
 
     async def synthesize_budget(self, state: BudgetState) -> dict[str, Any]:
         llm = build_qwen_chat()

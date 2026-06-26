@@ -1,4 +1,4 @@
-import pytest
+﻿import pytest
 from provinces.menxia_review.graph import MenxiaReviewAgent
 
 
@@ -99,7 +99,11 @@ async def test_offline_verdict_rejects_empty_daily_plan():
 
 
 @pytest.mark.asyncio
-async def test_offline_verdict_approves_only_requested_bureaus():
+async def test_offline_verdict_approves_only_requested_bureaus(monkeypatch):
+    async def fail_live_review(**kwargs):
+        raise ValueError("force offline review")
+
+    monkeypatch.setattr("provinces.menxia_review.graph.run_structured_synthesis", fail_live_review)
     agent = MenxiaReviewAgent()
     result = await agent.verdict(
         {
@@ -320,3 +324,4 @@ async def test_verdict_approves_live_mcp_research_draft_for_liubu_completion(mon
     assert called["live_review"] is False
     assert any("Liubu" in note for note in verdict["review_notes"])
     assert any("pending" in warning.lower() for warning in verdict["warnings"])
+

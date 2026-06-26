@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 
 FEATURE_DIR = Path("specs/001-resolve-report-issues")
@@ -6,6 +6,7 @@ EVIDENCE_FILE = FEATURE_DIR / "verification-evidence.md"
 ENV_KEYS = {
     "SESSION_CACHE_MAX_ENTRIES",
     "SESSION_CACHE_TTL_SECONDS",
+    "LANGGRAPH_CHECKPOINT_DB",
     "ENABLE_LANGGRAPH_INTERRUPTS",
     "QWEN_TIMEOUT_SECONDS",
     "RUN_LIVE_TESTS",
@@ -23,6 +24,7 @@ TARGETED_TEST_FILES = {
     "tests/test_offline_fallbacks.py",
     "tests/test_live_config.py",
     "tests/test_docs_examples.py",
+    "tests/test_official_cleanup.py",
 }
 LIVE_TEST_FILES = {
     "tests/test_live_config.py",
@@ -52,11 +54,18 @@ def _evidence_rows() -> dict[str, dict[str, str]]:
     return rows
 
 
-def test_example_output_does_not_contain_legacy_placeholder_transport():
-    example = Path("docs/example-output.md").read_text(encoding="utf-8")
+def test_official_rewrite_cleanup_log_records_removed_surfaces():
+    cleanup = Path("docs/official-rewrite-cleanup.md").read_text(encoding="utf-8")
 
-    assert "Placeholder Air" not in example
-    assert "verified against historical avg" not in example
+    for phrase in (
+        "utils/state_machine.py",
+        "utils/permission_matrix.py",
+        "utils/mcp_tools.py",
+        "LangGraph checkpointer",
+        "Command(resume=...)",
+        "MultiServerMCPClient",
+    ):
+        assert phrase in cleanup
 
 
 def test_new_runtime_environment_variables_are_documented():
@@ -120,7 +129,6 @@ def test_api_contract_covers_actual_response_fields():
         "progress_events",
         "generated_at",
         "resume_state",
-        "replay_reason",
     ):
         assert field in contract
 

@@ -1,4 +1,4 @@
-# Environment variables
+﻿# Environment variables
 .env
 .env.*
 !.env.example
@@ -46,6 +46,8 @@ Thumbs.db
 *.tmp
 
 *.md
+!docs/official-rewrite-cleanup.md
 !specs/001-resolve-report-issues/quickstart.md
 !specs/001-resolve-report-issues/tasks.md
 !specs/001-resolve-report-issues/verification-evidence.md
+

@@ -1,7 +1,7 @@
-import pytest
+﻿import pytest
 
 from provinces.shangshu_orchestrator.orchestrator import ShangshuOrchestrator
-from utils.permission_matrix import AgentRole
+from utils.schemas import AgentRole
 
 
 def test_resolve_liubu_targets_defaults_when_field_missing():
@@ -64,3 +64,4 @@ def test_register_execution_result_records_liubu_quality_metadata():
     assert context.quality_gate_results["FLIGHT_TRANSPORT"]["passed"] is False
     assert context.progress_events[-1]["stage"] == "execution_quality_gate"
     assert "wrong_departure_date" in context.progress_events[-1]["message"]
+

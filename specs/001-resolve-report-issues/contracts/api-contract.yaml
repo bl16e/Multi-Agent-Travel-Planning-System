@@ -1,4 +1,4 @@
-openapi: 3.1.0
+﻿openapi: 3.1.0
 info:
   title: Three Provinces Six Bureaus Travel Planner - Report Closure Contract
   version: 1.0.0
@@ -44,15 +44,14 @@ paths:
               $ref: '#/components/schemas/PlanningRequest'
       responses:
         '200':
-          description: Server-sent event stream
+          description: Public SSE stream with progress, result, error, and done events
           content:
             text/event-stream:
               schema:
                 type: string
-                description: Emits progress, result, error, and done events.
   /resume/{request_id}:
     post:
-      summary: Resume a human-intervention planning session
+      summary: Resume an interrupted planning request with boundary checkpoint metadata
       parameters:
         - $ref: '#/components/parameters/RequestId'
       requestBody:
@@ -63,7 +62,7 @@ paths:
               $ref: '#/components/schemas/HumanResumePayload'
       responses:
         '200':
-          description: Boundary continuation result or explicit replay result
+          description: Final package, human intervention, or rejection after Command(resume=...)
           content:
             application/json:
               schema:
@@ -74,10 +73,10 @@ paths:
         '404':
           description: Unknown or unsafe request_id
         '409':
-          description: Stored session is corrupt
+          description: Stored session is corrupt or lacks boundary checkpoint metadata
   /resume/{request_id}/stream:
     post:
-      summary: Resume a human-intervention planning session with SSE progress
+      summary: Resume an interrupted planning request and stream public SSE events
       parameters:
         - $ref: '#/components/parameters/RequestId'
       requestBody:
@@ -88,12 +87,11 @@ paths:
               $ref: '#/components/schemas/HumanResumePayload'
       responses:
         '200':
-          description: Server-sent event stream
+          description: Public SSE stream with progress, result, error, and done events
           content:
             text/event-stream:
               schema:
                 type: string
-                description: Emits progress, result, error, and done events.
         '404':
           description: Unknown or unsafe request_id
         '409':
@@ -113,7 +111,7 @@ paths:
         '404':
           description: Unknown or unsafe request_id
         '409':
-          description: Stored session is corrupt
+          description: Stored session is corrupt or lacks boundary checkpoint metadata
   /download/{request_id}:
     get:
       summary: Download generated Markdown or iCalendar artifact
@@ -200,13 +198,9 @@ components:
           items:
             type: object
         resume_mode:
-          enum: [boundary, replay, none]
+          enum: [boundary, none]
         resume_state:
-          type: object
-          additionalProperties: true
-        replay_reason:
-          type: string
-          nullable: true
+          $ref: '#/components/schemas/ResumeState'
     RejectionResponse:
       type: object
       required: [status, request_id]
@@ -293,13 +287,9 @@ components:
           type: string
           format: date-time
         resume_mode:
-          enum: [boundary, replay, none]
+          enum: [boundary, none]
         resume_state:
-          type: object
-          additionalProperties: true
-        replay_reason:
-          type: string
-          nullable: true
+          $ref: '#/components/schemas/ResumeState'
     DashboardSnapshot:
       type: object
       required: [request_id, status]
@@ -322,13 +312,28 @@ components:
         has_package:
           type: boolean
         resume_mode:
-          enum: [boundary, replay, none]
+          enum: [boundary, none]
         resume_state:
-          type: object
-          additionalProperties: true
-        replay_reason:
+          $ref: '#/components/schemas/ResumeState'
+    ResumeState:
+      type: object
+      properties:
+        mode:
+          const: boundary
+        thread_id:
+          type: string
+        interrupt_id:
           type: string
           nullable: true
+        question:
+          type: string
+        next:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
     ErrorResponse:
       type: object
       required: [detail]

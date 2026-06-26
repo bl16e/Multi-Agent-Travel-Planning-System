@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
-import json
-from datetime import date, datetime
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
@@ -13,17 +11,22 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from utils.schemas import FinalTravelPackageModel, PlanningRequest
-from utils.markdown_formatter import format_package_to_markdown
 from utils.path_safety import validate_request_id
 from utils.session_cache import InMemorySessionCache
 from utils.session_store import CorruptSessionError, JsonSessionStore, SessionStore, StoredSession
 from utils.settings import get_settings
 from workflow import ProvinceWorkflow
 
+logger = logging.getLogger(__name__)
+
 
 class HumanResumePayload(BaseModel):
     profile_updates: dict[str, Any] = Field(default_factory=dict)
     user_message: str | None = None
+
+
+class BoundaryResumeConflict(RuntimeError):
+    pass
 
 
 class ThreeProvinceTravelSystem:
@@ -42,44 +45,38 @@ class ThreeProvinceTravelSystem:
         result = await self.workflow.run(effective_request)
         return self._record_workflow_result(effective_request, result)
 
+    async def stream_plan_trip(self, request: PlanningRequest, human_resume: HumanResumePayload | None = None):
+        effective_request = self._merge_request(request, human_resume)
+        async for event in self.workflow.stream_run(effective_request):
+            if event.get("event") == "result":
+                yield {"event": "result", "data": _result_to_jsonable(self._record_workflow_result(effective_request, event["data"]))}
+            else:
+                yield event
+
     async def resume_trip(self, request_id: str, payload: HumanResumePayload) -> FinalTravelPackageModel | dict[str, Any]:
-        request_id = validate_request_id(request_id)
+        validate_request_id(request_id)
         session = self.sessions.get(request_id) or self._load_session(request_id)
         if not session:
-            raise KeyError(f"Unknown request_id: {request_id}")
-        request: PlanningRequest = session["request"]
-        resume_state = session.get("resume_state") or {}
-        if resume_state.get("mode") == "boundary":
-            try:
-                result = await self.workflow.resume(resume_state, payload)
-                effective_request = self._merge_request(request, payload)
-                return self._record_workflow_result(
-                    effective_request,
-                    result,
-                    resume_mode="boundary",
-                    resume_state=resume_state,
-                    include_resume_metadata=True,
-                )
-            except (KeyError, TypeError, ValueError):
-                pass
-        replay_reason = "Stored session has no compatible boundary resume state."
-        result = await self.workflow.run(self._merge_request(request, payload))
-        replay_state = {
-            "mode": "replay",
-            "next_node": None,
-            "state": {},
-            "question": session.get("result", {}).get("question"),
-            "created_at": datetime.now().astimezone().isoformat(),
-            "replay_reason": replay_reason,
-        }
-        return self._record_workflow_result(
-            self._merge_request(request, payload),
-            result,
-            resume_mode="replay",
-            resume_state=replay_state,
-            replay_reason=replay_reason,
-            include_resume_metadata=True,
-        )
+            raise KeyError(request_id)
+        if session.get("resume_mode") != "boundary" or not session.get("resume_state", {}).get("thread_id"):
+            raise BoundaryResumeConflict("Stored session has no boundary checkpoint metadata; resume cannot continue.")
+        result = await self.workflow.resume(session["resume_state"], payload)
+        effective_request = PlanningRequest.model_validate(result.get("request") or session["request"].model_dump(mode="python"))
+        return self._record_workflow_result(effective_request, result, include_resume_metadata=True)
+
+    async def stream_resume_trip(self, request_id: str, payload: HumanResumePayload):
+        validate_request_id(request_id)
+        session = self.sessions.get(request_id) or self._load_session(request_id)
+        if not session:
+            raise KeyError(request_id)
+        if session.get("resume_mode") != "boundary" or not session.get("resume_state", {}).get("thread_id"):
+            raise BoundaryResumeConflict("Stored session has no boundary checkpoint metadata; resume cannot continue.")
+        async for event in self.workflow.stream_resume(session["resume_state"], payload):
+            if event.get("event") == "result":
+                effective_request = PlanningRequest.model_validate(event["data"].get("request") or session["request"].model_dump(mode="python"))
+                yield {"event": "result", "data": _result_to_jsonable(self._record_workflow_result(effective_request, event["data"], include_resume_metadata=True))}
+            else:
+                yield event
 
     def dashboard_snapshot(self, request_id: str) -> dict[str, Any]:
         request_id = validate_request_id(request_id)
@@ -98,7 +95,7 @@ class ThreeProvinceTravelSystem:
             "has_package": "package" in session and session.get("package") is not None,
             "resume_mode": session.get("resume_mode", "none"),
             "resume_state": resume_state,
-            "replay_reason": resume_state.get("replay_reason") or session.get("replay_reason"),
+
         }
 
     def _merge_request(self, request: PlanningRequest, human_resume: HumanResumePayload | None) -> PlanningRequest:
@@ -166,7 +163,7 @@ class ThreeProvinceTravelSystem:
         *,
         resume_mode: str | None = None,
         resume_state: dict[str, Any] | None = None,
-        replay_reason: str | None = None,
+
         include_resume_metadata: bool = False,
     ) -> FinalTravelPackageModel | dict[str, Any]:
         effective_resume_mode = resume_mode or result.get("resume_mode") or "none"
@@ -179,8 +176,6 @@ class ThreeProvinceTravelSystem:
             "resume_mode": effective_resume_mode,
             "resume_state": effective_resume_state or {},
         }
-        if replay_reason:
-            session["replay_reason"] = replay_reason
         self.sessions[request.request_id] = session
         if result.get("status") == "DONE":
             package = FinalTravelPackageModel.model_validate(result["final_package"])
@@ -188,14 +183,14 @@ class ThreeProvinceTravelSystem:
             self._persist_session(request.request_id, session)
             if include_resume_metadata:
                 response = package.model_dump(mode="json")
-                response.update(self._resume_response_fields(effective_resume_mode, effective_resume_state, replay_reason))
+                response.update(self._resume_response_fields(effective_resume_mode, effective_resume_state))
                 return response
             return package
         self._persist_session(request.request_id, session)
         if result.get("status") == "REJECTED":
             response = dict(result.get("rejected_payload", result))
             if include_resume_metadata:
-                response.update(self._resume_response_fields(effective_resume_mode, effective_resume_state, replay_reason))
+                response.update(self._resume_response_fields(effective_resume_mode, effective_resume_state))
             return response
         context = result.get("context")
         response = {
@@ -206,21 +201,18 @@ class ThreeProvinceTravelSystem:
             "progress_events": context.progress_events if context else result.get("progress_events", []),
         }
         if result.get("resume_mode") or include_resume_metadata:
-            response.update(self._resume_response_fields(effective_resume_mode, effective_resume_state, replay_reason))
+            response.update(self._resume_response_fields(effective_resume_mode, effective_resume_state))
         return response
 
     def _resume_response_fields(
         self,
         resume_mode: str,
         resume_state: dict[str, Any] | None,
-        replay_reason: str | None,
     ) -> dict[str, Any]:
         fields: dict[str, Any] = {
             "resume_mode": resume_mode,
             "resume_state": resume_state or {},
         }
-        if replay_reason:
-            fields["replay_reason"] = replay_reason
         return fields
 
 
@@ -237,13 +229,57 @@ def console_progress_reporter(line: str) -> None:
     print(line, flush=True)
 
 
+def logger_progress_reporter(line: str) -> None:
+    logger.info("workflow_progress | %s", line)
+
+
 app = FastAPI(title="Three Provinces Six Bureaus Travel Planner", version="2.1.0")
 
 _HERE = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
 templates = Jinja2Templates(directory=_HERE / "templates")
 
-system = ThreeProvinceTravelSystem(artifact_dir=DEFAULT_ARTIFACT_DIR)
+class SessionLookup:
+    def __init__(self, session_store: SessionStore | None = None) -> None:
+        self.session_store = session_store or JsonSessionStore(get_settings().session_store_dir)
+
+    def _load_session(self, request_id: str) -> dict[str, Any] | None:
+        stored = self.session_store.load(request_id)
+        if stored is None:
+            return None
+        session: dict[str, Any] = {
+            "request": PlanningRequest.model_validate(stored.request),
+            "status": stored.status,
+            "context_snapshot": stored.context_snapshot,
+            "result": stored.result,
+            "resume_state": stored.resume_state,
+            "resume_mode": stored.resume_mode,
+        }
+        if stored.package is not None:
+            session["package"] = FinalTravelPackageModel.model_validate(stored.package)
+        return session
+
+    def dashboard_snapshot(self, request_id: str) -> dict[str, Any]:
+        request_id = validate_request_id(request_id)
+        session = _shared_sessions.get(request_id) or self._load_session(request_id)
+        if not session:
+            raise KeyError(request_id)
+        context_snapshot = session.get("context_snapshot") or {}
+        resume_state = session.get("resume_state") or {}
+        return {
+            "request_id": request_id,
+            "status": session.get("status"),
+            "current_state": context_snapshot.get("current_state"),
+            "pending_user_inputs": context_snapshot.get("pending_user_inputs", []),
+            "progress_events": context_snapshot.get("progress_events", []),
+            "has_package": "package" in session and session.get("package") is not None,
+            "resume_mode": session.get("resume_mode", "none"),
+            "resume_state": resume_state,
+
+        }
+
+
+session_lookup = SessionLookup()
 
 
 def create_travel_system(progress_reporter: Callable[[str], None] | None = None) -> ThreeProvinceTravelSystem:
@@ -280,7 +316,7 @@ async def _execute_plan_request(
     progress_reporter: Callable[[str], None] | None = None,
     human_resume: HumanResumePayload | None = None,
 ) -> FinalTravelPackageModel | dict[str, Any]:
-    planner = create_travel_system(progress_reporter=progress_reporter)
+    planner = create_travel_system(progress_reporter=progress_reporter or logger_progress_reporter)
     if human_resume is None:
         result = await planner.plan_trip(request)
     else:
@@ -298,7 +334,7 @@ async def _execute_resume_request(
     session = _load_resume_session(request_id)
     if not session:
         raise KeyError(f"Unknown request_id: {request_id}")
-    planner = create_travel_system(progress_reporter=progress_reporter)
+    planner = create_travel_system(progress_reporter=progress_reporter or logger_progress_reporter)
     safe_request_id = validate_request_id(request_id)
     planner.sessions[safe_request_id] = session
     result = await planner.resume_trip(safe_request_id, payload)
@@ -309,87 +345,7 @@ async def _execute_resume_request(
 def _load_resume_session(request_id: str) -> dict[str, Any] | None:
     safe_request_id = validate_request_id(request_id)
     _cleanup_shared_sessions()
-    return _shared_sessions.get(safe_request_id) or system._load_session(safe_request_id)
-
-
-def _sse_event(name: str, data: dict[str, Any]) -> str:
-    return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
-
-
-def _stream_execution(
-    request: PlanningRequest,
-    *,
-    human_resume: HumanResumePayload | None = None,
-) -> StreamingResponse:
-    queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
-
-    def progress_reporter(line: str) -> None:
-        queue.put_nowait(("progress", {"line": line}))
-
-    async def run_workflow() -> None:
-        try:
-            result = await _execute_plan_request(
-                request,
-                progress_reporter=progress_reporter,
-                human_resume=human_resume,
-            )
-            queue.put_nowait(("result", _result_to_jsonable(result)))
-        except Exception:
-            queue.put_nowait(("error", _planning_failure_detail()))
-        finally:
-            queue.put_nowait(None)
-
-    async def event_generator():
-        task = asyncio.create_task(run_workflow())
-        try:
-            while True:
-                event = await queue.get()
-                if event is None:
-                    yield _sse_event("done", {})
-                    break
-                name, data = event
-                yield _sse_event(name, data)
-        except asyncio.CancelledError:
-            task.cancel()
-            raise
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
-def _stream_resume_execution(request_id: str, payload: HumanResumePayload) -> StreamingResponse:
-    queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
-
-    def progress_reporter(line: str) -> None:
-        queue.put_nowait(("progress", {"line": line}))
-
-    async def run_workflow() -> None:
-        try:
-            result = await _execute_resume_request(
-                request_id,
-                payload,
-                progress_reporter=progress_reporter,
-            )
-            queue.put_nowait(("result", _result_to_jsonable(result)))
-        except Exception:
-            queue.put_nowait(("error", _planning_failure_detail()))
-        finally:
-            queue.put_nowait(None)
-
-    async def event_generator():
-        task = asyncio.create_task(run_workflow())
-        try:
-            while True:
-                event = await queue.get()
-                if event is None:
-                    yield _sse_event("done", {})
-                    break
-                name, data = event
-                yield _sse_event(name, data)
-        except asyncio.CancelledError:
-            task.cancel()
-            raise
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return _shared_sessions.get(safe_request_id) or session_lookup._load_session(safe_request_id)
 
 
 @app.get("/health")
@@ -404,21 +360,18 @@ async def index(request: Request):
 
 @app.post("/plan/stream")
 async def plan_stream(request: PlanningRequest):
-    return _stream_execution(request)
+    return StreamingResponse(
+        _sse_plan_events(request),
+        media_type="text/event-stream",
+    )
 
 
 @app.post("/resume/{request_id}/stream")
 async def resume_stream(request_id: str, payload: HumanResumePayload):
-    try:
-        session = _load_resume_session(request_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}") from exc
-    except CorruptSessionError as exc:
-        raise HTTPException(status_code=409, detail="Stored session is corrupt") from exc
-    if not session:
-        raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}")
-
-    return _stream_resume_execution(request_id, payload)
+    return StreamingResponse(
+        _sse_resume_events(request_id, payload),
+        media_type="text/event-stream",
+    )
 
 
 @app.get("/download/{request_id:path}")
@@ -452,6 +405,8 @@ async def resume_trip(request_id: str, payload: HumanResumePayload) -> Any:
         raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}") from exc
     except CorruptSessionError as exc:
         raise HTTPException(status_code=409, detail="Stored session is corrupt") from exc
+    except BoundaryResumeConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -460,7 +415,7 @@ async def resume_trip(request_id: str, payload: HumanResumePayload) -> Any:
 async def dashboard(request_id: str) -> dict[str, Any]:
     try:
         _cleanup_shared_sessions()
-        return system.dashboard_snapshot(request_id)
+        return session_lookup.dashboard_snapshot(request_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}") from exc
     except CorruptSessionError as exc:
@@ -469,42 +424,38 @@ async def dashboard(request_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Unknown request_id: {request_id}") from exc
 
 
-async def demo() -> None:
-    demo_system = ThreeProvinceTravelSystem(
-        artifact_dir=DEFAULT_ARTIFACT_DIR,
-        progress_reporter=console_progress_reporter,
-    )
-    request = PlanningRequest.model_validate(
-        {
-            "request_id": "demo_tokyo_three_provinces", 
-            "user_message": "Plan a highly structured Tokyo trip with clear logistics, review gates, and calendar output.", 
-            "profile": 
-            {
-                "origin_city": "Beijing", 
-                "origin_airport_code": "", 
-                "destination_preferences": ["Tokyo"], 
-                "destination_airport_code": "HND", 
-                "start_date": date(2026, 4, 18), 
-                "end_date": date(2026, 4, 21), 
-                "adults": 3, 
-                "budget_level": "mid_range", 
-                "total_budget": 2000, 
-                "currency": "USD", 
-                "interests": ["food", "culture", "city walks"], 
-                "constraints": ["prefer predictable transfers", "need calendar-ready schedule"], 
-                "pace": "structured"
-            }
-        })
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] demo | 开始运行 main.py 示例", flush=True)
-    result = await demo_system.plan_trip(request)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] demo | 最终输出如下", flush=True)
-    if isinstance(result, FinalTravelPackageModel):
-        markdown_output = format_package_to_markdown(result.model_dump(mode="python"))
-        Path("travel_plan.md").write_text(markdown_output, encoding="utf-8")
-        print(f"\n[INFO] Markdown 文件已保存至: travel_plan.md", flush=True)
-    else:
-        print(json.dumps(result, ensure_ascii=False, indent=2, default=str), flush=True)
+def _sse_format(event: str, payload: dict[str, Any]) -> str:
+    import json
+
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
 
 
-if __name__ == "__main__":
-    asyncio.run(demo())
+async def _sse_plan_events(request: PlanningRequest):
+    planner = create_travel_system(progress_reporter=logger_progress_reporter)
+    try:
+        yield _sse_format("progress", {"message": "planning_started", "request_id": request.request_id})
+        async for event in planner.stream_plan_trip(request):
+            yield _sse_format(event["event"], event.get("data", {}))
+        _cache_planner_sessions(planner)
+    except Exception as exc:
+        yield _sse_format("error", {"error": type(exc).__name__, "message": str(exc)})
+    finally:
+        yield _sse_format("done", {"request_id": request.request_id})
+
+
+async def _sse_resume_events(request_id: str, payload: HumanResumePayload):
+    safe_request_id = validate_request_id(request_id)
+    try:
+        session = _load_resume_session(safe_request_id)
+        if not session:
+            raise KeyError(f"Unknown request_id: {safe_request_id}")
+        planner = create_travel_system(progress_reporter=logger_progress_reporter)
+        planner.sessions[safe_request_id] = session
+        yield _sse_format("progress", {"message": "resume_started", "request_id": safe_request_id})
+        async for event in planner.stream_resume_trip(safe_request_id, payload):
+            yield _sse_format(event["event"], event.get("data", {}))
+        _cache_planner_sessions(planner)
+    except Exception as exc:
+        yield _sse_format("error", {"error": type(exc).__name__, "message": str(exc)})
+    finally:
+        yield _sse_format("done", {"request_id": safe_request_id})

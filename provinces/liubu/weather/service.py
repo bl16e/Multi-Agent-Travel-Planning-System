@@ -4,65 +4,126 @@ import asyncio
 import logging
 from datetime import date
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 
+from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
 
-from utils.agent_runtime import escape_prompt_template_text, run_react_mcp_task, soul_path_for
+from provinces.liubu.constrained.state import LiubuWorkerInput
+from provinces.liubu.official_tooling import EvidenceToolNode, bind_tools_if_available, invoke_bound_tool_model, load_allowed_liubu_tools, run_tool_node_collect_evidence
+from utils.agent_runtime import escape_prompt_template_text, soul_path_for
 from utils.schemas import WeatherExecutionResult
 from utils.llm_factory import build_qwen_chat
 from utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS: float | None = None
+WEATHER_ALLOWED_TOOLS = {"search_google_maps", "search_local_places"}
+WEATHER_TOOL_SERVERS = ["serpapi"]
 
 
 class WeatherState(TypedDict, total=False):
-    payload: dict[str, Any]
+    worker_input: LiubuWorkerInput | dict[str, Any]
+    messages: Annotated[list[Any], add_messages]
     destination: str
     daily_plan: list[dict[str, Any]]
     research_notes: str
+    tool_evidence: list[dict[str, Any]]
+    tool_step_count: int
     result: dict[str, Any]
 
 
 class WeatherBureau:
     def __init__(self) -> None:
         self.soul_path = soul_path_for(__file__)
+        self.tool_node = EvidenceToolNode([], collector=run_tool_node_collect_evidence)
+        self.bound_tool_model = None
+        self._tooling_ready = False
         self.graph = self._build_graph()
 
-    async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        result = await self.graph.ainvoke({"payload": payload})
+    async def run(self, subtask: dict[str, Any]) -> dict[str, Any]:
+        await self.ensure_live_tooling()
+        result = await self.graph.ainvoke(dict(subtask))
         return result["result"]
+
+    async def ensure_live_tooling(self) -> None:
+        if self._tooling_ready:
+            return
+        tools = await load_allowed_liubu_tools(WEATHER_TOOL_SERVERS, WEATHER_ALLOWED_TOOLS)
+        self.tool_node = EvidenceToolNode(tools, collector=run_tool_node_collect_evidence)
+        self.bound_tool_model = bind_tools_if_available(build_qwen_chat(), tools)
+        self.graph = self._build_graph()
+        self._tooling_ready = True
 
     def _build_graph(self):
         graph = StateGraph(WeatherState)
-        graph.add_node("ingest", self.ingest)
-        graph.add_node("research_weather", self.research_weather)
-        graph.add_node("synthesize_weather", self.synthesize_weather)
-        graph.set_entry_point("ingest")
-        graph.add_edge("ingest", "research_weather")
-        graph.add_edge("research_weather", "synthesize_weather")
-        graph.add_edge("synthesize_weather", END)
+        graph.add_node("agent", self.agent)
+        graph.add_node("tools", self.tool_node)
+        graph.add_node("quality_gate", self.quality_gate)
+        graph.set_entry_point("agent")
+        graph.add_conditional_edges("agent", self._route_after_agent, {"tools": "tools", "quality_gate": "quality_gate"})
+        graph.add_edge("tools", "agent")
+        graph.add_edge("quality_gate", END)
         return graph.compile()
 
-    async def ingest(self, state: WeatherState) -> dict[str, Any]:
-        payload = state["payload"]
-        approved_draft = payload.get("approved_draft", {})
-        draft = approved_draft.get("itinerary_draft", {})
-        return {"destination": approved_draft.get("destination") or draft.get("destination") or "Unknown Destination", "daily_plan": draft.get("daily_plan", [])}
-
-    async def research_weather(self, state: WeatherState) -> dict[str, Any]:
-        notes = await run_react_mcp_task(
-            soul_path=self.soul_path,
-            server_names=["amap"],
-            user_task=(
-                f"Research weather guidance for destination {state['destination']}. "
-                f"Trip dates: {[item.get('date') for item in state.get('daily_plan', [])]}. "
-                "Use MCP tools when available and return concise planning notes about weather, temperature, rain risk, and packing impact."
-            ),
+    async def agent(self, state: WeatherState) -> dict[str, Any]:
+        worker_input = self._worker_input(state)
+        if self.bound_tool_model is not None and int(state.get("tool_step_count") or 0) == 0:
+            tool_message = await invoke_bound_tool_model(
+                self.bound_tool_model,
+                [HumanMessage(content=f"Search live weather and local context for {worker_input.destination}.")],
+                bureau=worker_input.bureau,
+                request_id=worker_input.request_id,
+                destination=worker_input.destination,
+            )
+            if getattr(tool_message, "tool_calls", None):
+                return {"worker_input": worker_input, "messages": [tool_message]}
+        evidence = list(state.get("tool_evidence", []) or [])
+        live_notes = [str(item.get("result")) for item in evidence if item.get("status") == "ok"]
+        research_notes = (
+            f"No live weather ToolNode evidence was available for {worker_input.destination}; "
+            "using structured synthesis or deterministic fallback."
         )
-        return {"research_notes": notes}
+        if live_notes:
+            research_notes = "\n".join(live_notes)
+        result = await self.synthesize_weather(
+            {
+                "destination": worker_input.destination,
+                "daily_plan": worker_input.daily_plan,
+                "research_notes": research_notes,
+            }
+        )
+        payload = result["result"]
+        if live_notes:
+            payload["status"] = "ok"
+            payload["data_source"] = "live"
+        payload["liubu_evidence"] = evidence
+        return {
+            "destination": worker_input.destination,
+            "daily_plan": worker_input.daily_plan,
+            "research_notes": research_notes,
+            "tool_evidence": evidence,
+            "result": payload,
+        }
+
+    async def tools(self, state: WeatherState) -> dict[str, Any]:
+        return {
+            "tool_evidence": list(state.get("tool_evidence", [])),
+            "tool_step_count": int(state.get("tool_step_count") or 0) + 1,
+        }
+
+    async def quality_gate(self, state: WeatherState) -> dict[str, Any]:
+        return {"result": state["result"]}
+
+    def _route_after_agent(self, state: WeatherState) -> str:
+        messages = state.get("messages") or []
+        last_message = messages[-1] if messages else None
+        return "tools" if getattr(last_message, "tool_calls", None) else "quality_gate"
+
+    def _worker_input(self, state: WeatherState) -> LiubuWorkerInput:
+        return LiubuWorkerInput.model_validate(state["worker_input"])
 
     async def synthesize_weather(self, state: WeatherState) -> dict[str, Any]:
         llm = build_qwen_chat()

@@ -1,17 +1,37 @@
 ﻿from __future__ import annotations
 
 from datetime import date, datetime
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
-from utils.permission_matrix import AgentRole
-from utils.state_machine import WorkflowState
-
 ExecutionStatus = Literal["ok", "fallback", "error"]
 DataSource = Literal["live", "structured_llm", "fallback_estimate", "unavailable"]
+
+
+class AgentRole(StrEnum):
+    USER = "USER"
+    SHANGSHU = "SHANGSHU"
+    ZHONGSHU = "ZHONGSHU"
+    MENXIA = "MENXIA"
+    WEATHER = "WEATHER"
+    BUDGET = "BUDGET"
+    ACCOMMODATION = "ACCOMMODATION"
+    FLIGHT_TRANSPORT = "FLIGHT_TRANSPORT"
+    CALENDAR = "CALENDAR"
+
+
+class WorkflowState(StrEnum):
+    DRAFT = "DRAFT"
+    REVIEW = "REVIEW"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    HUMAN_INTERVENE = "HUMAN_INTERVENE"
+    EXECUTE = "EXECUTE"
+    ASSEMBLE = "ASSEMBLE"
+    DONE = "DONE"
 
 
 class ConfirmationStatus(str, Enum):
@@ -220,6 +240,7 @@ class WeatherExecutionResult(BaseModel):
     packing_list: list[str]
     warnings: list[str] = Field(default_factory=list)
     summary: str
+    liubu_evidence: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CalendarEventModel(BaseModel):
@@ -244,6 +265,7 @@ class CalendarExecutionResult(BaseModel):
     events_created: int
     calendar_name: str
     warnings: list[str] = Field(default_factory=list)
+    liubu_evidence: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class BudgetLineItemModel(BaseModel):
@@ -262,6 +284,7 @@ class BudgetExecutionResult(BaseModel):
     budget_breakdown: list[BudgetLineItemModel]
     total_estimated_cost: float
     warnings: list[str] = Field(default_factory=list)
+    liubu_evidence: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class HotelOptionModel(BaseModel):
@@ -342,3 +365,5 @@ class OrchestratorAssembledOutputModel(BaseModel):
     execution_results: dict[str, Any] = Field(default_factory=dict)
     progress_events: list[dict[str, Any]] = Field(default_factory=list)
     state_history: list[dict[str, Any]] = Field(default_factory=list)
+
+

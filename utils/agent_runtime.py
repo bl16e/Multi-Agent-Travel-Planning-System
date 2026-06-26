@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -7,20 +7,15 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.prompts import ChatPromptTemplate
-from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field
 
 from utils.llm_factory import build_qwen_chat
-from utils.mcp_client import load_mcp_tools
 from utils.schemas import DayPlanModel, ItineraryDraftModel
 from utils.settings import get_settings
 
 
 FALLBACK_MESSAGE = "MCP or LLM unavailable; falling back to heuristic synthesis."
-DEFAULT_TOOL_LOAD_TIMEOUT_SECONDS = 6.0
-DEFAULT_AGENT_INVOKE_TIMEOUT_SECONDS = 18.0
 DEFAULT_STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS = 20.0
-DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 15.0
 
 
 class ItineraryDraftStructuredOutput(BaseModel):
@@ -40,41 +35,6 @@ def load_soul_prompt(path: str | Path) -> str:
 
 def escape_prompt_template_text(text: str) -> str:
     return text.replace("{", "{{").replace("}", "}}")
-
-
-async def run_direct_mcp_tool_calls(
-    *,
-    server_names: list[str],
-    tool_calls: list[dict[str, Any]],
-    tool_load_timeout_seconds: float = DEFAULT_TOOL_LOAD_TIMEOUT_SECONDS,
-    tool_call_timeout_seconds: float = DEFAULT_TOOL_CALL_TIMEOUT_SECONDS,
-) -> str:
-    try:
-        tools = await asyncio.wait_for(load_mcp_tools(server_names), timeout=tool_load_timeout_seconds)
-    except asyncio.TimeoutError:
-        return f"{FALLBACK_MESSAGE} MCP tool loading timed out after {tool_load_timeout_seconds:.0f}s."
-    except Exception as exc:
-        return f"{FALLBACK_MESSAGE} MCP tool loading failed: {exc}"
-
-    tools_by_name = {getattr(tool, "name", ""): tool for tool in tools}
-    results: list[dict[str, Any]] = []
-    for call in tool_calls:
-        tool_name = str(call.get("tool") or "")
-        tool = tools_by_name.get(tool_name)
-        if tool is None:
-            results.append({"tool": tool_name, "status": "missing"})
-            continue
-        try:
-            result = await asyncio.wait_for(tool.ainvoke(call.get("args") or {}), timeout=tool_call_timeout_seconds)
-            results.append({"tool": tool_name, "status": "ok", "result": _compact_mcp_tool_result(result)})
-        except asyncio.TimeoutError:
-            results.append({"tool": tool_name, "status": "timeout"})
-        except Exception as exc:
-            results.append({"tool": tool_name, "status": "error", "error": str(exc)})
-
-    if not results:
-        return FALLBACK_MESSAGE
-    return json.dumps(results, ensure_ascii=False, default=str)
 
 
 def _compact_mcp_tool_result(result: Any) -> Any:
@@ -116,46 +76,6 @@ def _compact_place_result(item: dict[str, Any]) -> dict[str, Any]:
     )
     return {key: item.get(key) for key in fields if item.get(key) is not None}
 
-
-async def run_react_mcp_task(
-    *,
-    soul_path: str | Path,
-    server_names: list[str],
-    user_task: str,
-    allowed_tool_names: list[str] | None = None,
-    tool_load_timeout_seconds: float = DEFAULT_TOOL_LOAD_TIMEOUT_SECONDS,
-    invoke_timeout_seconds: float | None = None,
-) -> str:
-    llm = build_qwen_chat()
-    if llm is None:
-        return FALLBACK_MESSAGE
-    try:
-        tools = await asyncio.wait_for(load_mcp_tools(server_names), timeout=tool_load_timeout_seconds)
-    except asyncio.TimeoutError:
-        return f"{FALLBACK_MESSAGE} MCP tool loading timed out after {tool_load_timeout_seconds:.0f}s."
-    except Exception as exc:
-        return f"{FALLBACK_MESSAGE} MCP tool loading failed: {exc}"
-    prompt = load_soul_prompt(soul_path)
-
-    if allowed_tool_names is not None:
-        allowed = set(allowed_tool_names)
-        tools = [tool for tool in tools if getattr(tool, "name", "") in allowed]
-
-    if not tools:
-        return FALLBACK_MESSAGE
-
-    effective_invoke_timeout = invoke_timeout_seconds or get_settings().qwen_timeout_seconds
-    agent = create_react_agent(model=llm, tools=tools, prompt=prompt)
-    try:
-        result = await asyncio.wait_for(agent.ainvoke({"messages": [("user", user_task)]}), timeout=effective_invoke_timeout)
-    except asyncio.TimeoutError:
-        return f"{FALLBACK_MESSAGE} Agent execution timed out after {effective_invoke_timeout:.0f}s."
-    except Exception as exc:
-        return f"{FALLBACK_MESSAGE} Agent tool execution failed: {exc}"
-    messages = result.get("messages", [])
-    if not messages:
-        return "No MCP research output returned."
-    return str(messages[-1].content)
 
 
 async def run_structured_synthesis(
@@ -429,3 +349,6 @@ def _parse_date(value: Any) -> date | None:
         except ValueError:
             return None
     return None
+
+
+
