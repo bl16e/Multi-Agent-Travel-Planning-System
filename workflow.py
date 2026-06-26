@@ -570,11 +570,105 @@ class ProvinceWorkflow:
     async def _node_assemble(self, state: SystemState) -> dict[str, Any]:
         self._emit_progress("shangshu_assemble", "start", "assemble final package")
         context = state["context"]
+        fallback_sources = self._fallback_delivery_sources(
+            state.get("draft_packet", {}),
+            state.get("review_packet", {}),
+            state.get("execution_results", {}),
+        )
+        if fallback_sources:
+            result = {
+                "context": context,
+                "status": "REJECTED",
+                "rejected_payload": {
+                    "status": "REJECTED",
+                    "request_id": context.request_id,
+                    "reason": "fallback_outputs_not_deliverable",
+                    "summary": "Final package requires non-fallback review and bureau evidence before delivery.",
+                    "fallback_sources": fallback_sources,
+                    "review": state.get("review_packet", {}),
+                    "dashboard_url": self.orchestrator.build_dashboard_link(context),
+                },
+            }
+            self._emit_progress("shangshu_assemble", "done", "fallback outputs blocked before final delivery", result)
+            return result
         assembled = self.orchestrator.assemble_outputs(context)
         package = self.build_final_package(PlanningRequest.model_validate(state["request"]), assembled, state["draft_packet"], state["review_packet"], state.get("execution_results", {}), self.artifact_dir)
         result = {"context": context, "status": "DONE", "final_package": package.model_dump(mode="json")}
         self._emit_progress("shangshu_assemble", "done", "final package assembled", result)
         return result
+
+    def _fallback_delivery_sources(
+        self,
+        draft_packet: dict[str, Any],
+        review_packet: dict[str, Any],
+        execution_results: dict[str, Any],
+    ) -> list[dict[str, str]]:
+        sources: list[dict[str, str]] = []
+        if self._contains_fallback_content(draft_packet):
+            sources.append(
+                {
+                    "component": "ZHONGSHU",
+                    "status": "approved",
+                    "data_source": "live",
+                    "reason": "fallback_content",
+                }
+            )
+        review_source = str(review_packet.get("data_source") or "")
+        if review_source in {"fallback_estimate", "unavailable"}:
+            sources.append(
+                {
+                    "component": "MENXIA",
+                    "status": str(review_packet.get("verdict") or "unknown"),
+                    "data_source": review_source,
+                }
+            )
+        for bureau_name, result in sorted((execution_results or {}).items()):
+            if not isinstance(result, dict):
+                continue
+            status = str(result.get("status") or "unknown")
+            data_source = str(result.get("data_source") or "unavailable")
+            if status in {"fallback", "error"} or data_source in {"fallback_estimate", "unavailable"}:
+                sources.append(
+                    {
+                        "component": str(bureau_name),
+                        "status": status,
+                        "data_source": data_source,
+                    }
+                )
+                continue
+            if self._contains_fallback_content(result):
+                sources.append(
+                    {
+                        "component": str(bureau_name),
+                        "status": status,
+                        "data_source": data_source,
+                        "reason": "fallback_content",
+                    }
+                )
+        return sources
+
+    def _contains_fallback_content(self, payload: Any) -> bool:
+        text = json.dumps(payload, ensure_ascii=False, default=str).lower()
+        blocked_terms = (
+            "fallback_estimate",
+            "live_research_fallback",
+            "fallback_from",
+            "estimated fallback",
+            " fell back ",
+            "fallback output",
+            "offline fallback",
+            "structured synthesis failed",
+            "structured synthesis timed out",
+            "error: toolexception",
+            "please fix your mistakes",
+            "generic placeholder",
+            "named local checkpoints",
+            "venue confirmation block",
+            "main visitor district",
+            "input-derived offline plan segment",
+            "replace with live venue details",
+        )
+        return any(term in text for term in blocked_terms)
 
     async def _node_finish_human(self, state: SystemState) -> dict[str, Any]:
         question = state.get("question") or "Review requires user input."

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import date
 from pathlib import Path
@@ -20,8 +21,8 @@ from utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS: float | None = None
-WEATHER_ALLOWED_TOOLS = {"search_google_maps", "search_local_places"}
-WEATHER_TOOL_SERVERS = ["serpapi"]
+WEATHER_ALLOWED_TOOLS = {"maps_weather"}
+WEATHER_TOOL_SERVERS = ["amap"]
 
 
 class WeatherState(TypedDict, total=False):
@@ -40,6 +41,7 @@ class WeatherBureau:
         self.soul_path = soul_path_for(__file__)
         self.tool_node = EvidenceToolNode([], collector=run_tool_node_collect_evidence)
         self.bound_tool_model = None
+        self.available_tool_names: set[str] = set()
         self._tooling_ready = False
         self.graph = self._build_graph()
 
@@ -52,6 +54,7 @@ class WeatherBureau:
         if self._tooling_ready:
             return
         tools = await load_allowed_liubu_tools(WEATHER_TOOL_SERVERS, WEATHER_ALLOWED_TOOLS)
+        self.available_tool_names = {str(getattr(tool, "name", "")) for tool in tools}
         self.tool_node = EvidenceToolNode(tools, collector=run_tool_node_collect_evidence)
         self.bound_tool_model = bind_tools_if_available(build_qwen_chat(), tools)
         self.graph = self._build_graph()
@@ -70,6 +73,24 @@ class WeatherBureau:
 
     async def agent(self, state: WeatherState) -> dict[str, Any]:
         worker_input = self._worker_input(state)
+        if "maps_weather" in self.available_tool_names and int(state.get("tool_step_count") or 0) == 0:
+            from langchain_core.messages import AIMessage
+
+            return {
+                "worker_input": worker_input,
+                "messages": [
+                    AIMessage(
+                        content="Search Amap weather.",
+                        tool_calls=[
+                            {
+                                "name": "maps_weather",
+                                "args": {"city": worker_input.destination},
+                                "id": f"{worker_input.request_id}-weather-1",
+                            }
+                        ],
+                    )
+                ],
+            }
         if self.bound_tool_model is not None and int(state.get("tool_step_count") or 0) == 0:
             tool_message = await invoke_bound_tool_model(
                 self.bound_tool_model,
@@ -88,17 +109,21 @@ class WeatherBureau:
         )
         if live_notes:
             research_notes = "\n".join(live_notes)
-        result = await self.synthesize_weather(
-            {
-                "destination": worker_input.destination,
-                "daily_plan": worker_input.daily_plan,
-                "research_notes": research_notes,
-            }
-        )
-        payload = result["result"]
-        if live_notes:
-            payload["status"] = "ok"
-            payload["data_source"] = "live"
+        live_weather = self._weather_from_live_evidence(worker_input, evidence)
+        if live_weather is not None:
+            payload = live_weather
+        else:
+            result = await self.synthesize_weather(
+                {
+                    "destination": worker_input.destination,
+                    "daily_plan": worker_input.daily_plan,
+                    "research_notes": research_notes,
+                }
+            )
+            payload = result["result"]
+            if live_notes:
+                payload["status"] = "ok"
+                payload["data_source"] = "live"
         payload["liubu_evidence"] = evidence
         return {
             "destination": worker_input.destination,
@@ -149,6 +174,108 @@ class WeatherBureau:
                 failure_warning = f"Weather structured synthesis failed: {exc}"
         else:
             failure_warning = "Weather structured synthesis unavailable; using fallback estimate."
-        fallback_date = date.today()
-        result = WeatherExecutionResult(destination=state["destination"], forecast_days=[{"date": fallback_date, "condition": "Weather unavailable", "min_temp_c": 18, "max_temp_c": 26, "precipitation_probability": 0.2, "activity_suitability": "Use flexible scheduling.", "clothing_advice": ["Pack light layers."], "warnings": ["MCP research unavailable."], "is_estimated": True}], packing_list=["passport", "phone charger", "comfortable walking shoes", "light layers"], warnings=["Weather output fell back because MCP or structured synthesis failed.", failure_warning], summary=state.get("research_notes", "Fallback weather guidance."))
+        forecast_dates = self._forecast_dates(state.get("daily_plan", []))
+        result = WeatherExecutionResult(
+            destination=state["destination"],
+            forecast_days=[
+                {
+                    "date": forecast_date,
+                    "condition": "Weather unavailable",
+                    "min_temp_c": 18,
+                    "max_temp_c": 26,
+                    "precipitation_probability": 0.2,
+                    "activity_suitability": "Use flexible scheduling.",
+                    "clothing_advice": ["Pack light layers."],
+                    "warnings": ["MCP research unavailable."],
+                    "is_estimated": True,
+                }
+                for forecast_date in forecast_dates
+            ],
+            packing_list=["passport", "phone charger", "comfortable walking shoes", "light layers"],
+            warnings=["Weather output fell back because MCP or structured synthesis failed.", failure_warning],
+            summary=state.get("research_notes", "Fallback weather guidance."),
+        )
         return {"result": result.model_dump(mode="json")}
+
+    def _weather_from_live_evidence(self, worker_input: LiubuWorkerInput, evidence: list[dict[str, Any]]) -> dict[str, Any] | None:
+        forecast_dates = self._forecast_dates(worker_input.daily_plan)
+        for item in evidence:
+            if item.get("status") != "ok" or item.get("tool_name") != "maps_weather":
+                continue
+            result = item.get("result")
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except json.JSONDecodeError:
+                    continue
+            if not isinstance(result, dict):
+                continue
+            forecasts = result.get("forecasts")
+            if not isinstance(forecasts, list):
+                continue
+            casts: list[dict[str, Any]] = []
+            for forecast in forecasts:
+                if not isinstance(forecast, dict):
+                    continue
+                if isinstance(forecast.get("casts"), list):
+                    casts.extend(cast for cast in forecast["casts"] if isinstance(cast, dict))
+                elif forecast.get("date"):
+                    casts.append(forecast)
+            days: list[dict[str, Any]] = []
+            for forecast_date in forecast_dates:
+                cast = next((candidate for candidate in casts if str(candidate.get("date")) == forecast_date.isoformat()), None)
+                if cast is None and casts:
+                    cast = casts[min(len(days), len(casts) - 1)]
+                if cast is None:
+                    continue
+                min_temp = self._float_or_default(cast.get("nighttemp"), 18.0)
+                max_temp = self._float_or_default(cast.get("daytemp"), min_temp)
+                days.append(
+                    {
+                        "date": forecast_date,
+                        "condition": str(cast.get("dayweather") or cast.get("nightweather") or "Weather available"),
+                        "min_temp_c": min_temp,
+                        "max_temp_c": max_temp,
+                        "precipitation_probability": 0.0,
+                        "activity_suitability": "Use the live Amap forecast to schedule outdoor blocks flexibly.",
+                        "clothing_advice": ["Pack layers suitable for the live forecast."],
+                        "warnings": [],
+                        "is_estimated": False,
+                    }
+                )
+            if days:
+                return WeatherExecutionResult(
+                    status="ok",
+                    data_source="live",
+                    destination=worker_input.destination,
+                    forecast_days=days,
+                    packing_list=["phone charger", "comfortable walking shoes", "weather-appropriate layers"],
+                    warnings=[],
+                    summary="Live Amap weather forecast was used for the trip dates.",
+                ).model_dump(mode="json")
+        return None
+
+    def _float_or_default(self, value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _forecast_dates(self, daily_plan: list[dict[str, Any]]) -> list[date]:
+        dates: list[date] = []
+        for day in daily_plan:
+            value = day.get("date") if isinstance(day, dict) else None
+            parsed = self._parse_date(value)
+            if parsed is not None and parsed not in dates:
+                dates.append(parsed)
+        return dates or [date.today()]
+
+    def _parse_date(self, value: Any) -> date | None:
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value)
+            except ValueError:
+                return None
+        return None

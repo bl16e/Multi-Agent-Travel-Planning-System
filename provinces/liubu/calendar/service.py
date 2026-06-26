@@ -77,6 +77,21 @@ class CalendarBureau:
 
     async def agent(self, state: CalendarState) -> dict[str, Any]:
         worker_input = self._worker_input(state)
+        if self._daily_plan_has_live_links(worker_input.daily_plan):
+            event_result = await self.build_events(
+                {
+                    "daily_plan": worker_input.daily_plan,
+                    "research_notes": "Approved live itinerary activities available.",
+                    "force_itinerary_events": True,
+                }
+            )
+            return {
+                "destination": worker_input.destination,
+                "daily_plan": worker_input.daily_plan,
+                "research_notes": "Approved live itinerary activities available.",
+                "tool_evidence": [],
+                **event_result,
+            }
         if self.bound_tool_model is not None and int(state.get("tool_step_count") or 0) == 0:
             tool_message = await invoke_bound_tool_model(
                 self.bound_tool_model,
@@ -122,6 +137,8 @@ class CalendarBureau:
         return await self.write_calendar(state)
 
     async def build_events(self, state: CalendarState) -> dict[str, Any]:
+        if state.get("force_itinerary_events"):
+            return self._events_from_daily_plan(state, live=True, initial_warnings=[])
         llm = build_qwen_chat()
         if llm:
             try:
@@ -149,14 +166,37 @@ class CalendarBureau:
                 failure_warning = f"Calendar structured synthesis failed: {exc}"
         else:
             failure_warning = "Calendar structured synthesis unavailable; using itinerary-derived fallback events."
+        return self._events_from_daily_plan(state, live=False, initial_warnings=[failure_warning])
+
+    def _events_from_daily_plan(
+        self,
+        state: CalendarState,
+        *,
+        live: bool,
+        initial_warnings: list[str],
+    ) -> dict[str, Any]:
         events: list[dict[str, Any]] = []
-        warnings: list[str] = [failure_warning]
-        for day in state.get("daily_plan", []):
-            for activity in day.get("activities", []):
+        warnings: list[str] = list(initial_warnings)
+        daily_plan = state.get("daily_plan", [])
+        expected_events = 0
+        has_live_activity_link = False
+        for day in daily_plan:
+            activities = day.get("activities", []) if isinstance(day, dict) else []
+            expected_events += len(activities)
+            for activity in activities:
+                if activity.get("map_link"):
+                    has_live_activity_link = True
                 try:
                     events.append(CalendarEventModel(title=activity.get("title", "Activity"), start_at=self._combine_datetime(day.get("date"), activity.get("start_time", "09:00")), end_at=self._combine_datetime(day.get("date"), activity.get("end_time", "10:00")), location=activity.get("location_name", ""), description=activity.get("description", ""), url=activity.get("booking_link") or activity.get("map_link")).model_dump(mode="json"))
                 except ValueError as exc:
                     warnings.append(str(exc))
+        if expected_events and len(events) == expected_events and has_live_activity_link:
+            return {
+                "events": events,
+                "calendar_status": "ok",
+                "calendar_data_source": "live",
+                "calendar_warnings": [] if live else ["Calendar events generated from approved live itinerary activities."],
+            }
         status = "error" if any("missing itinerary date" in item.lower() for item in warnings) else "fallback"
         data_source = "unavailable" if status == "error" else "fallback_estimate"
         return {"events": events if status != "error" else [], "calendar_status": status, "calendar_data_source": data_source, "calendar_warnings": warnings}
@@ -185,3 +225,10 @@ class CalendarBureau:
 
     def _worker_input(self, state: CalendarState) -> LiubuWorkerInput:
         return LiubuWorkerInput.model_validate(state["worker_input"])
+
+    def _daily_plan_has_live_links(self, daily_plan: list[dict[str, Any]]) -> bool:
+        return any(
+            activity.get("map_link") or activity.get("booking_link")
+            for day in daily_plan
+            for activity in day.get("activities", [])
+        )

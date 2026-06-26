@@ -82,6 +82,40 @@ class WrappedItineraryPromptTemplate:
         return WrappedItineraryPrompt()
 
 
+class LooseItineraryChain:
+    def __init__(self, output_model):
+        self.output_model = output_model
+
+    async def ainvoke(self, variables):
+        return self.output_model.model_validate(
+            {
+                "destination": "\u4e0a\u6d77",
+                "overview": "Structured Shanghai itinerary.",
+                "trip_style": "structured",
+                "planning_notes": "Use named attractions and verify bookings.",
+                "itinerary_draft": [
+                    {
+                        "date": "2026-10-24",
+                        "activities": "\u4e0a\u5348\uff1a\u53c2\u89c2\u4e0a\u6d77\u535a\u7269\u9986\u3002\u4e0b\u5348\uff1a\u6f2b\u6b65\u5916\u6ee9\u3002",
+                        "transport": "\u5730\u94c1\u548c\u6b65\u884c",
+                        "booking_link": "https://www.shanghaimuseum.net/",
+                    }
+                ],
+            }
+        )
+
+
+class LooseItineraryPrompt:
+    def __or__(self, output_model):
+        return LooseItineraryChain(output_model)
+
+
+class LooseItineraryPromptTemplate:
+    @staticmethod
+    def from_messages(messages):
+        return LooseItineraryPrompt()
+
+
 class UnsupportedOutputModel:
     pass
 
@@ -187,11 +221,70 @@ async def test_structured_synthesis_uses_live_research_context_when_llm_times_ou
 
     serialized = result.model_dump_json()
     assert result.destination == "Tokyo"
-    assert result.overview.startswith("Live MCP research was used")
+    assert result.overview.startswith("\u57fa\u4e8e\u5b9e\u65f6\u5730\u70b9\u68c0\u7d22\u7ed3\u679c")
     assert "Senso-ji Temple" in serialized
     assert "Tokyo National Museum" in serialized
     assert "Tokyo food route with named local checkpoints" not in serialized
-    assert any("structured_llm_timeout" in note for note in result.planning_notes)
+    assert "fallback" not in serialized.lower()
+
+
+@pytest.mark.asyncio
+async def test_structured_synthesis_uses_amap_poi_research_context_when_llm_times_out(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "build_qwen_chat", lambda: FakeLLM())
+    monkeypatch.setattr(agent_runtime, "ChatPromptTemplate", FakePromptTemplate)
+
+    research_context = json.dumps(
+        [
+            {
+                "tool": "maps_text_search",
+                "status": "ok",
+                "result": json.dumps({
+                    "pois": [
+                        {
+                            "name": "\u4e0a\u6d77\u535a\u7269\u9986",
+                            "type": "\u79d1\u6559\u6587\u5316\u670d\u52a1;\u535a\u7269\u9986",
+                            "address": "\u4e0a\u6d77\u5e02\u9ec4\u6d66\u533a\u4eba\u6c11\u5927\u9053201\u53f7",
+                            "location": "121.475379,31.228017",
+                            "website": "https://www.shanghaimuseum.net/",
+                        },
+                        {
+                            "name": "\u5916\u6ee9",
+                            "type": "\u98ce\u666f\u540d\u80dc;\u98ce\u666f\u540d\u80dc",
+                            "address": "\u4e0a\u6d77\u5e02\u9ec4\u6d66\u533a\u4e2d\u5c71\u4e1c\u4e00\u8def",
+                            "location": "121.490317,31.240638",
+                        },
+                        {
+                            "name": "\u4e0a\u6d77\u6587\u5316\u5e7f\u573a",
+                            "typecode": "110105",
+                            "address": "\u8302\u540d\u5357\u8def178\u53f7",
+                        },
+                    ]
+                }),
+            }
+        ]
+    )
+
+    result = await agent_runtime.run_structured_synthesis(
+        soul_path="provinces/zhongshu_itinerary/SOUL.md",
+        output_model=ItineraryDraftModel,
+        user_prompt="ignored",
+        variables={
+            "destination": "\u4e0a\u6d77",
+            "start_date": "2026-10-24",
+            "end_date": "2026-10-25",
+            "interests": "culture, food",
+            "research_context": research_context,
+        },
+    )
+
+    serialized = result.model_dump_json()
+    assert result.destination == "\u4e0a\u6d77"
+    assert "\u4e0a\u6d77\u535a\u7269\u9986" in serialized
+    assert "\u5916\u6ee9" in serialized
+    assert "\u4e0a\u6d77 culture route with named local checkpoints" not in serialized
+    assert "Amap POI result" not in serialized
+    assert "110105" not in serialized
+    assert "fallback" not in serialized.lower()
 
 
 @pytest.mark.asyncio
@@ -208,6 +301,31 @@ async def test_structured_synthesis_accepts_wrapped_itinerary_output(monkeypatch
 
     assert result.overview == "Wrapped live itinerary."
     assert result.daily_plan[0].activities[0].title == "Senso-ji Temple"
+
+
+@pytest.mark.asyncio
+async def test_structured_synthesis_normalizes_loose_qwen_itinerary_output(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "build_qwen_chat", lambda: SchemaReturningLLM())
+    monkeypatch.setattr(agent_runtime, "ChatPromptTemplate", LooseItineraryPromptTemplate)
+
+    result = await agent_runtime.run_structured_synthesis(
+        soul_path="provinces/zhongshu_itinerary/SOUL.md",
+        output_model=ItineraryDraftModel,
+        user_prompt="ignored",
+        variables={
+            "destination": "\u4e0a\u6d77",
+            "start_date": "2026-10-24",
+            "end_date": "2026-10-24",
+            "interests": "culture, food",
+        },
+    )
+
+    assert result.destination == "\u4e0a\u6d77"
+    assert result.daily_plan[0].day_index == 1
+    assert result.daily_plan[0].city == "\u4e0a\u6d77"
+    assert result.daily_plan[0].activities
+    assert "\u4e0a\u6d77\u535a\u7269\u9986" in result.daily_plan[0].activities[0].title
+    assert isinstance(result.planning_notes, list)
 
 
 @pytest.mark.asyncio

@@ -1,11 +1,19 @@
 ﻿from __future__ import annotations
 
+import asyncio
+import json
+import logging
 from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
 from utils.agent_runtime import run_structured_synthesis, soul_path_for
+from utils.mcp_client import load_mcp_tools
 from utils.schemas import BureauTaskSpec, ItineraryDraftModel, ZhongshuDraftPacketModel
+from utils.settings import get_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class ZhongshuState(TypedDict, total=False):
@@ -99,7 +107,7 @@ class ZhongshuItineraryAgent:
         normalized = state["normalized_request"]
 
         try:
-            research_context = "Direct MCP tool calls removed; rebuild with official LangGraph ToolNode or LangChain MCP agent integration."
+            research_context = await self._collect_research_context(normalized, request_id=str(state.get("request_id") or ""))
 
             draft = await run_structured_synthesis(
                 soul_path=self.soul_path,
@@ -138,6 +146,72 @@ class ZhongshuItineraryAgent:
             return {"draft": draft.model_dump(mode="json")}
         except Exception as e:
             raise RuntimeError(f"中书省生成行程失败: {str(e)}") from e
+
+    async def _collect_research_context(self, normalized: dict[str, Any], *, request_id: str) -> str:
+        destination = str(normalized.get("destination") or "").strip()
+        if not destination:
+            return "Live research skipped: destination missing."
+
+        timeout_seconds = get_settings().mcp_tooling_timeout_seconds
+        try:
+            tools = await load_mcp_tools(["amap"])
+        except Exception as exc:
+            logger.warning(
+                "Zhongshu live research tool loading failed request_id=%s destination=%s error_type=%s error=%s",
+                request_id,
+                destination,
+                type(exc).__name__,
+                exc,
+            )
+            return f"Live Amap research unavailable: {type(exc).__name__}"
+
+        text_search = next((tool for tool in tools if getattr(tool, "name", None) == "maps_text_search"), None)
+        if text_search is None:
+            logger.info(
+                "Zhongshu live research skipped because maps_text_search is unavailable request_id=%s destination=%s",
+                request_id,
+                destination,
+            )
+            return "Live Amap research unavailable: maps_text_search missing."
+
+        interests = [str(item).strip() for item in normalized.get("interests", []) if str(item).strip()]
+        queries = [f"{destination} {interest}" for interest in interests] or [destination]
+
+        evidence: list[dict[str, Any]] = []
+        for query in queries[:4]:
+            args = {"keywords": query, "city": destination, "citylimit": True}
+            try:
+                logger.info(
+                    "Zhongshu live Amap research invoking maps_text_search request_id=%s destination=%s query=%s",
+                    request_id,
+                    destination,
+                    query,
+                )
+                result = await asyncio.wait_for(text_search.ainvoke(args), timeout=timeout_seconds)
+                evidence.append({"tool": "maps_text_search", "status": "ok", "args": args, "result": result})
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Zhongshu live Amap research timed out request_id=%s destination=%s query=%s timeout_seconds=%s",
+                    request_id,
+                    destination,
+                    query,
+                    timeout_seconds,
+                )
+                evidence.append({"tool": "maps_text_search", "status": "timeout", "args": args})
+            except Exception as exc:
+                logger.warning(
+                    "Zhongshu live Amap research failed request_id=%s destination=%s query=%s error_type=%s error=%s",
+                    request_id,
+                    destination,
+                    query,
+                    type(exc).__name__,
+                    exc,
+                )
+                evidence.append({"tool": "maps_text_search", "status": "error", "args": args, "error": str(exc)})
+
+        if not any(item.get("status") == "ok" for item in evidence):
+            return "Live Amap research unavailable: no successful maps_text_search result."
+        return json.dumps(evidence, ensure_ascii=False)
 
     async def decompose_tasks(self, state: ZhongshuState) -> dict[str, Any]:
         draft = ItineraryDraftModel.model_validate(state["draft"])

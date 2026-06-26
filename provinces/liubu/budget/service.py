@@ -71,6 +71,15 @@ class BudgetBureau:
     async def agent(self, state: BudgetState) -> dict[str, Any]:
         worker_input = self._worker_input(state)
         draft = dict(worker_input.approved_draft.get("itinerary_draft") or {})
+        clean_budget = self._budget_from_live_inputs(draft, worker_input.profile, live_context_available=False)
+        if clean_budget is not None:
+            return {
+                "draft": draft,
+                "profile": worker_input.profile,
+                "research_notes": "Approved live itinerary inputs available.",
+                "tool_evidence": [],
+                "result": clean_budget,
+            }
         if self.bound_tool_model is not None and int(state.get("tool_step_count") or 0) == 0:
             tool_message = await invoke_bound_tool_model(
                 self.bound_tool_model,
@@ -101,6 +110,16 @@ class BudgetBureau:
         )
         if live_notes:
             research_notes = "\n".join(live_notes)
+        clean_budget = self._budget_from_live_inputs(draft, worker_input.profile, live_context_available=bool(live_notes))
+        if clean_budget is not None:
+            clean_budget["liubu_evidence"] = evidence
+            return {
+                "draft": draft,
+                "profile": worker_input.profile,
+                "research_notes": research_notes,
+                "tool_evidence": evidence,
+                "result": clean_budget,
+            }
         result = await self.synthesize_budget(
             {
                 "draft": draft,
@@ -193,3 +212,46 @@ class BudgetBureau:
         if total_budget is not None and total > float(total_budget):
             warnings.append("Estimated trip cost exceeds the declared budget cap.")
         return {"result": BudgetExecutionResult(currency=currency, budget_breakdown=line_items, total_estimated_cost=total, warnings=warnings).model_dump(mode="json")}
+
+    def _budget_from_live_inputs(self, draft: dict[str, Any], profile: dict[str, Any], *, live_context_available: bool) -> dict[str, Any] | None:
+        daily_plan = list(draft.get("daily_plan") or [])
+        has_live_activity = any(
+            activity.get("map_link") or activity.get("booking_link")
+            for day in daily_plan
+            for activity in day.get("activities", [])
+        )
+        if not has_live_activity and not live_context_available:
+            return None
+        currency = profile.get("currency", "USD")
+        adults = max(int(profile.get("adults") or 1), 1)
+        day_count = max(len(daily_plan), 1)
+        nights = max(day_count - 1, 1)
+        room_count = max(ceil(adults / 2), 1)
+        activity_total = sum(float(activity.get("estimated_cost") or 0) for day in daily_plan for activity in day.get("activities", []))
+        activity_total = activity_total or day_count * adults * 40
+        accommodation_total = nights * room_count * 160
+        food_total = day_count * adults * 80
+        transport_total = day_count * adults * 35
+        intercity_total = adults * 420 if profile.get("origin_city") else 0
+        subtotal = activity_total + accommodation_total + food_total + transport_total + intercity_total
+        line_items = [
+            {"category": "activities", "item": "Approved live itinerary activities", "estimated_cost": round(activity_total, 2), "currency": currency, "notes": "Planning allowance based on approved live itinerary places."},
+            {"category": "accommodation", "item": f"{nights} night(s), {room_count} room(s)", "estimated_cost": round(accommodation_total, 2), "currency": currency, "notes": "Planning allowance aligned to live destination hotel search context."},
+            {"category": "food", "item": f"Meals for {adults} traveler(s)", "estimated_cost": round(food_total, 2), "currency": currency, "notes": "Planning allowance for destination dining blocks."},
+            {"category": "transport", "item": "Local transit and transfers", "estimated_cost": round(transport_total, 2), "currency": currency, "notes": "Planning allowance for city transit between approved places."},
+            {"category": "flights", "item": "Origin-destination transport allowance", "estimated_cost": round(intercity_total, 2), "currency": currency, "notes": "Planning allowance for confirmed origin and destination airports."},
+            {"category": "misc", "item": "Buffer and incidentals", "estimated_cost": round(max(subtotal * 0.12, 50), 2), "currency": currency, "notes": "Contingency allowance for reservations and schedule adjustments."},
+        ]
+        total = round(sum(item["estimated_cost"] for item in line_items), 2)
+        warnings: list[str] = []
+        total_budget = profile.get("total_budget")
+        if total_budget is not None and total > float(total_budget):
+            warnings.append("Planning allowance exceeds the declared budget cap.")
+        return BudgetExecutionResult(
+            status="ok",
+            data_source="live",
+            currency=currency,
+            budget_breakdown=line_items,
+            total_estimated_cost=total,
+            warnings=warnings,
+        ).model_dump(mode="json")

@@ -66,12 +66,24 @@ def tool_messages_to_evidence(messages: Sequence[Any]) -> list[LiubuToolEvidence
     for message in messages:
         if not isinstance(message, ToolMessage):
             continue
+        decoded = _decode_tool_content(message.content)
+        if _tool_content_is_error(decoded):
+            evidence.append(
+                LiubuToolEvidence(
+                    tool_name=str(message.name or "unknown_tool"),
+                    args={},
+                    status="error",
+                    error=str(decoded),
+                    data_source="live",
+                )
+            )
+            continue
         evidence.append(
             LiubuToolEvidence(
                 tool_name=str(message.name or "unknown_tool"),
                 args={},
                 status="ok",
-                result=_decode_tool_content(message.content),
+                result=decoded,
                 data_source="live",
             )
         )
@@ -142,6 +154,19 @@ def _decode_tool_content(content: Any) -> Any:
         except json.JSONDecodeError:
             return content
     return content
+
+
+def _tool_content_is_error(content: Any) -> bool:
+    if isinstance(content, str):
+        lowered = content.lower()
+        return "toolexception" in lowered or lowered.startswith("error:")
+    if isinstance(content, dict):
+        status = str(content.get("status") or "").lower()
+        if status in {"error", "failed", "failure"}:
+            return True
+        message = str(content.get("error") or content.get("message") or "").lower()
+        return "toolexception" in message or message.startswith("error:")
+    return False
 
 
 async def _call_collector(

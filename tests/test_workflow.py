@@ -247,3 +247,270 @@ async def test_finish_human_creates_boundary_resume_metadata():
     assert result["resume_state"]["mode"] == "boundary"
     assert result["resume_state"]["thread_id"] == "resume_placeholder"
     assert result["resume_state"]["question"] == "Need budget"
+
+
+@pytest.mark.asyncio
+async def test_assemble_rejects_fallback_outputs_before_final_delivery(tmp_path):
+    workflow = ProvinceWorkflow(artifact_dir=tmp_path)
+    request = PlanningRequest(
+        request_id="fallback_delivery_gate",
+        user_message="Test trip to Tokyo",
+        profile=TravelerProfile(
+            destination_preferences=["Tokyo"],
+            origin_city="Beijing",
+            start_date="2026-05-01",
+            end_date="2026-05-01",
+            total_budget=5000,
+        ),
+    )
+    context = workflow.orchestrator.bootstrap(request.request_id, request.model_dump(mode="json"))
+    draft_packet = {
+        "request_id": request.request_id,
+        "destination": "Tokyo",
+        "itinerary_draft": {
+            "destination": "Tokyo",
+            "overview": "Specific Tokyo plan",
+            "trip_style": "structured",
+            "daily_plan": [
+                {
+                    "day_index": 1,
+                    "date": "2026-05-01",
+                    "city": "Tokyo",
+                    "theme": "Tokyo culture",
+                    "summary": "Visit Senso-ji and Ueno Park with named places.",
+                    "activities": [
+                        {
+                            "start_time": "09:00",
+                            "end_time": "11:00",
+                            "title": "Senso-ji Temple visit",
+                            "location_name": "Senso-ji, Asakusa",
+                            "description": "Visit the named temple complex.",
+                        }
+                    ],
+                }
+            ],
+            "planning_notes": [],
+            "pending_confirmations": [],
+            "risk_flags": [],
+        },
+        "required_bureaus": ["WEATHER", "BUDGET"],
+        "bureau_tasks": [],
+        "governance": {"producer": "ZHONGSHU", "revision_round": 0},
+    }
+    review_packet = {
+        "request_id": request.request_id,
+        "verdict": "APPROVED",
+        "summary": "Offline structural review approved the plan.",
+        "blocking_issues": [],
+        "revision_requests": [],
+        "human_questions": [],
+        "approved_bureaus": ["WEATHER", "BUDGET"],
+        "governance": {
+            "reviewer": "MENXIA",
+            "source_producer": "ZHONGSHU",
+            "next_hop": "SHANGSHU",
+            "verdict_state": "APPROVED",
+            "veto_enabled": True,
+            "rejection_round": 0,
+            "max_rejection_rounds": 2,
+        },
+        "review_notes": ["Offline review only."],
+        "data_source": "fallback_estimate",
+        "warnings": ["Offline structural review only."],
+    }
+    execution_results = {
+        "WEATHER": {
+            "bureau": "WEATHER",
+            "status": "fallback",
+            "data_source": "fallback_estimate",
+            "destination": "Tokyo",
+            "forecast_days": [],
+            "packing_list": [],
+            "warnings": ["offline weather"],
+            "summary": "Fallback weather",
+        },
+        "BUDGET": {
+            "bureau": "BUDGET",
+            "status": "fallback",
+            "data_source": "fallback_estimate",
+            "currency": "USD",
+            "budget_breakdown": [],
+            "total_estimated_cost": 0,
+            "warnings": ["offline budget"],
+        },
+    }
+
+    result = await workflow._node_assemble(
+        {
+            "request": request.model_dump(mode="json"),
+            "context": context,
+            "draft_packet": draft_packet,
+            "review_packet": review_packet,
+            "execution_results": execution_results,
+        }
+    )
+
+    assert result["status"] == "REJECTED"
+    assert "final_package" not in result
+    assert result["rejected_payload"]["reason"] == "fallback_outputs_not_deliverable"
+    assert result["rejected_payload"]["fallback_sources"]
+
+
+@pytest.mark.asyncio
+async def test_assemble_rejects_fallback_content_even_when_marked_live(tmp_path):
+    workflow = ProvinceWorkflow(artifact_dir=tmp_path)
+    request = PlanningRequest(
+        request_id="fallback_content_gate",
+        user_message="Test domestic trip to Shanghai",
+        profile=TravelerProfile(
+            destination_preferences=["\u4e0a\u6d77"],
+            origin_city="\u5317\u4eac",
+            start_date="2026-10-24",
+            end_date="2026-10-24",
+            total_budget=1800,
+            currency="CNY",
+        ),
+    )
+    context = workflow.orchestrator.bootstrap(request.request_id, request.model_dump(mode="json"))
+    draft_packet = {
+        "request_id": request.request_id,
+        "destination": "\u4e0a\u6d77",
+        "itinerary_draft": {
+            "destination": "\u4e0a\u6d77",
+            "overview": "Live researched Shanghai plan",
+            "trip_style": "structured",
+            "daily_plan": [
+                {
+                    "day_index": 1,
+                    "date": "2026-10-24",
+                    "city": "\u4e0a\u6d77",
+                    "theme": "\u4e0a\u6d77 \u6587\u5316",
+                    "summary": "Visit Shanghai Museum with named places.",
+                    "activities": [
+                        {
+                            "start_time": "09:00",
+                            "end_time": "11:00",
+                            "title": "\u4e0a\u6d77\u535a\u7269\u9986",
+                            "location_name": "\u4e0a\u6d77\u535a\u7269\u9986",
+                            "description": "Concrete approved activity.",
+                        }
+                    ],
+                }
+            ],
+            "planning_notes": [],
+            "pending_confirmations": [],
+            "risk_flags": [],
+        },
+        "required_bureaus": ["BUDGET"],
+        "bureau_tasks": [],
+        "governance": {"producer": "ZHONGSHU", "revision_round": 0},
+    }
+    review_packet = {
+        "request_id": request.request_id,
+        "verdict": "APPROVED",
+        "summary": "Live review approved the plan.",
+        "blocking_issues": [],
+        "revision_requests": [],
+        "human_questions": [],
+        "approved_bureaus": ["BUDGET"],
+        "governance": {"reviewer": "MENXIA", "verdict_state": "APPROVED"},
+        "review_notes": [],
+        "data_source": "live",
+        "warnings": [],
+    }
+    execution_results = {
+        "BUDGET": {
+            "bureau": "BUDGET",
+            "status": "ok",
+            "data_source": "live",
+            "currency": "CNY",
+            "budget_breakdown": [
+                {
+                    "category": "activities",
+                    "item": "Planned activity blocks",
+                    "estimated_cost": 40,
+                    "currency": "CNY",
+                    "notes": "Estimated fallback from itinerary activity costs.",
+                }
+            ],
+            "total_estimated_cost": 40,
+            "warnings": ["Budget output fell back because structured synthesis failed."],
+        },
+    }
+
+    result = await workflow._node_assemble(
+        {
+            "request": request.model_dump(mode="json"),
+            "context": context,
+            "draft_packet": draft_packet,
+            "review_packet": review_packet,
+            "execution_results": execution_results,
+        }
+    )
+
+    assert result["status"] == "REJECTED"
+    assert result["rejected_payload"]["fallback_sources"] == [
+        {"component": "BUDGET", "status": "ok", "data_source": "live", "reason": "fallback_content"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_assemble_rejects_zhongshu_fallback_content_before_delivery(tmp_path):
+    workflow = ProvinceWorkflow(artifact_dir=tmp_path)
+    request = PlanningRequest(
+        request_id="draft_fallback_content_gate",
+        user_message="Test domestic trip to Shanghai",
+        profile=TravelerProfile(
+            destination_preferences=["\u4e0a\u6d77"],
+            origin_city="\u5317\u4eac",
+            start_date="2026-10-24",
+            end_date="2026-10-24",
+            total_budget=1800,
+            currency="CNY",
+        ),
+    )
+    context = workflow.orchestrator.bootstrap(request.request_id, request.model_dump(mode="json"))
+    draft_packet = {
+        "request_id": request.request_id,
+        "destination": "\u4e0a\u6d77",
+        "itinerary_draft": {
+            "destination": "\u4e0a\u6d77",
+            "overview": "Live MCP research was used to build this draft.",
+            "trip_style": "live_research_fallback",
+            "daily_plan": [],
+            "planning_notes": ["data_source=live_mcp_research; synthesis=fallback_from_compact_tool_results."],
+            "pending_confirmations": [],
+            "risk_flags": [],
+        },
+        "required_bureaus": [],
+        "bureau_tasks": [],
+        "governance": {"producer": "ZHONGSHU", "revision_round": 0},
+    }
+    review_packet = {
+        "request_id": request.request_id,
+        "verdict": "APPROVED",
+        "summary": "Live review approved the plan.",
+        "blocking_issues": [],
+        "revision_requests": [],
+        "human_questions": [],
+        "approved_bureaus": [],
+        "governance": {"reviewer": "MENXIA", "verdict_state": "APPROVED"},
+        "review_notes": [],
+        "data_source": "live",
+        "warnings": [],
+    }
+
+    result = await workflow._node_assemble(
+        {
+            "request": request.model_dump(mode="json"),
+            "context": context,
+            "draft_packet": draft_packet,
+            "review_packet": review_packet,
+            "execution_results": {},
+        }
+    )
+
+    assert result["status"] == "REJECTED"
+    assert result["rejected_payload"]["fallback_sources"] == [
+        {"component": "ZHONGSHU", "status": "approved", "data_source": "live", "reason": "fallback_content"}
+    ]

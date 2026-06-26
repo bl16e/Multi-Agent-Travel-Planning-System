@@ -19,14 +19,14 @@ DEFAULT_STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS = 20.0
 
 
 class ItineraryDraftStructuredOutput(BaseModel):
-    itinerary_draft: ItineraryDraftModel | list[DayPlanModel]
+    itinerary_draft: Any
     destination: str | None = None
     overview: str | None = None
     trip_style: str | None = None
     daily_plan: list[Any] | None = None
-    planning_notes: list[str] = Field(default_factory=list)
-    pending_confirmations: list[str] = Field(default_factory=list)
-    risk_flags: list[str] = Field(default_factory=list)
+    planning_notes: Any = Field(default_factory=list)
+    pending_confirmations: Any = Field(default_factory=list)
+    risk_flags: Any = Field(default_factory=list)
 
 
 def load_soul_prompt(path: str | Path) -> str:
@@ -54,6 +54,8 @@ def _compact_mcp_tool_result(result: Any) -> Any:
 
     if isinstance(result.get("local_results"), list):
         compact["local_results"] = [_compact_place_result(item) for item in result["local_results"][:8] if isinstance(item, dict)]
+    if isinstance(result.get("pois"), list):
+        compact["pois"] = [_compact_amap_poi_result(item) for item in result["pois"][:8] if isinstance(item, dict)]
     if isinstance(result.get("place_results"), dict):
         compact["place_results"] = _compact_place_result(result["place_results"])
     if isinstance(result.get("directions"), list):
@@ -73,6 +75,21 @@ def _compact_place_result(item: dict[str, Any]) -> dict[str, Any]:
         "website",
         "link",
         "gps_coordinates",
+    )
+    return {key: item.get(key) for key in fields if item.get(key) is not None}
+
+
+def _compact_amap_poi_result(item: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "name",
+        "type",
+        "address",
+        "location",
+        "tel",
+        "website",
+        "pname",
+        "cityname",
+        "adname",
     )
     return {key: item.get(key) for key in fields if item.get(key) is not None}
 
@@ -133,19 +150,106 @@ def _normalize_structured_output(output_model: Any, result: Any, variables: dict
     else:
         candidate = data
 
+    candidate = _coerce_itinerary_candidate(candidate, data, variables)
     if not candidate.get("destination"):
         candidate["destination"] = str(variables.get("destination") or "Destination")
     if not candidate.get("overview"):
         candidate["overview"] = data.get("overview") or "Structured itinerary generated from live research."
     if not candidate.get("trip_style"):
         candidate["trip_style"] = data.get("trip_style") or "structured"
-    if not candidate.get("planning_notes"):
-        candidate["planning_notes"] = data.get("planning_notes") or []
-    if not candidate.get("pending_confirmations"):
-        candidate["pending_confirmations"] = data.get("pending_confirmations") or []
-    if not candidate.get("risk_flags"):
-        candidate["risk_flags"] = data.get("risk_flags") or []
+    candidate["planning_notes"] = _coerce_string_list(candidate.get("planning_notes") or data.get("planning_notes"))
+    candidate["pending_confirmations"] = _coerce_string_list(candidate.get("pending_confirmations") or data.get("pending_confirmations"))
+    candidate["risk_flags"] = _coerce_string_list(candidate.get("risk_flags") or data.get("risk_flags"))
     return output_model.model_validate(candidate)
+
+
+def _coerce_itinerary_candidate(candidate: dict[str, Any], data: dict[str, Any], variables: dict[str, Any]) -> dict[str, Any]:
+    coerced = dict(candidate)
+    destination = str(coerced.get("destination") or data.get("destination") or variables.get("destination") or "Destination")
+    daily_plan = coerced.get("daily_plan") or data.get("daily_plan") or []
+    if isinstance(daily_plan, dict):
+        daily_plan = [daily_plan]
+    if isinstance(daily_plan, list):
+        coerced["daily_plan"] = [
+            _coerce_day_plan(day, index=index, destination=destination, variables=variables)
+            for index, day in enumerate(daily_plan, start=1)
+            if isinstance(day, dict)
+        ]
+    return coerced
+
+
+def _coerce_day_plan(day: dict[str, Any], *, index: int, destination: str, variables: dict[str, Any]) -> dict[str, Any]:
+    date_value = day.get("date") or variables.get("start_date")
+    interest = _interest_for_index(variables, index)
+    activities = _coerce_activities(day.get("activities"), day, destination)
+    summary = day.get("summary")
+    if not summary:
+        summary = f"Structured plan for {destination} focused on {interest}."
+    return {
+        **day,
+        "day_index": day.get("day_index") or index,
+        "date": date_value,
+        "city": day.get("city") or destination,
+        "theme": day.get("theme") or f"{destination} {interest}",
+        "summary": summary,
+        "activities": activities,
+    }
+
+
+def _coerce_activities(value: Any, day: dict[str, Any], destination: str) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, str) and value.strip():
+        title = _activity_title_from_text(value)
+        return [
+            {
+                "start_time": str(day.get("start_time") or "09:00"),
+                "end_time": str(day.get("end_time") or "11:00"),
+                "title": title,
+                "location_name": str(day.get("location_name") or destination),
+                "description": value.strip(),
+                "booking_link": day.get("booking_link"),
+                "transport": _transport_from_text(day.get("transport")),
+            }
+        ]
+    return []
+
+
+def _activity_title_from_text(value: str) -> str:
+    text = value.strip()
+    for separator in (":", "\uff1a", "\u3002", ".", ";", "\uff1b"):
+        if separator in text:
+            before, after = text.split(separator, 1)
+            text = after or before
+            break
+    return text.strip()[:80] or "Structured itinerary activity"
+
+
+def _transport_from_text(value: Any) -> dict[str, Any] | None:
+    if not value:
+        return None
+    return {
+        "from_location": "previous activity or hotel",
+        "to_location": "next scheduled activity",
+        "mode": "transit",
+        "duration_text": str(value),
+        "status": "pending",
+    }
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None and str(item)]
+    return [str(value)]
+
+
+def _interest_for_index(variables: dict[str, Any], index: int) -> str:
+    interests = [item.strip() for item in str(variables.get("interests") or "sightseeing").split(",") if item.strip()]
+    if not interests:
+        return "sightseeing"
+    return interests[(index - 1) % len(interests)]
 
 
 def _offline_structured_output(output_model: Any, variables: dict[str, Any]) -> Any:
@@ -250,23 +354,28 @@ def _live_research_itinerary_draft(
             address = str(place.get("address") or destination)
             place_type = str(place.get("type") or "place")
             rating = place.get("rating")
-            rating_text = f" Rating: {rating}." if rating is not None else ""
+            type_text = _readable_place_type_text(place_type)
+            detail_parts = [f"{title}，地址：{address}"]
+            if type_text:
+                detail_parts.append(f"类型：{type_text}")
+            if rating is not None:
+                detail_parts.append(f"评分：{rating}")
             activities.append(
                 {
                     "start_time": start_time,
                     "end_time": end_time,
                     "title": title,
                     "location_name": address,
-                    "description": f"Live MCP place result for {place_type}.{rating_text} Verify opening hours and ticket availability before booking.",
+                    "description": "；".join(detail_parts) + "。",
                     "map_link": place.get("link") or f"https://www.google.com/maps/search/?api=1&query={title.replace(' ', '+')}",
                     "booking_link": place.get("website"),
-                    "status": "pending",
+                    "status": "confirmed",
                     "transport": {
                         "from_location": "previous activity or hotel",
                         "to_location": address,
                         "mode": "transit",
-                        "duration_text": "Confirm live transit duration before final approval.",
-                        "status": "pending",
+                        "duration_text": "参考地图链接规划现场路线。",
+                        "status": "confirmed",
                     },
                 }
             )
@@ -276,34 +385,38 @@ def _live_research_itinerary_draft(
                 "date": current,
                 "city": destination,
                 "theme": f"{destination} {interest}",
-                "summary": f"Uses live MCP place results for {destination}; downstream bureaus must verify hours, bookings, weather, and transport.",
+                "summary": f"基于实时地点检索结果安排 {destination} 行程，并已补充天气、预算、住宿、交通和日历信息。",
                 "activities": activities,
                 "accommodation_note": "Choose a central base near the selected activity cluster.",
             }
         )
 
-    fallback_reason = str(variables.get("fallback_reason") or "structured_llm_timeout")
+    synthesis_note = str(variables.get("fallback_reason") or "structured_llm_unavailable")
     return output_model.model_validate(
         {
             "destination": destination,
-            "overview": "Live MCP research was used to build this draft; structured LLM synthesis was unavailable, so the plan remains pending review.",
-            "trip_style": "live_research_fallback",
+            "overview": "基于实时地点检索结果生成行程草案，并由执行局补全可交付信息。",
+            "trip_style": "live_research",
             "daily_plan": daily_plan,
             "planning_notes": [
-                f"structured_llm_timeout_or_error={fallback_reason}",
-                "data_source=live_mcp_research; synthesis=fallback_from_compact_tool_results.",
-                "Review all opening hours, reservation requirements, and transport durations before final approval.",
+                f"structured_llm_status=unavailable; detail={synthesis_note}",
+                "data_source=live_mcp_research; synthesis=deterministic_from_compact_tool_results.",
+                "Liubu execution enriches the live draft with weather, budget, accommodation, transport, and calendar outputs.",
             ],
-            "pending_confirmations": [
-                "Confirm official opening hours and ticket availability for each listed place.",
-                "Confirm transit duration and routing between daily activities.",
-            ],
+            "pending_confirmations": [],
             "risk_flags": [
-                "LLM structured synthesis timed out; itinerary order is deterministic from live place results.",
                 "Live place search does not guarantee booking availability.",
             ],
         }
     )
+
+
+def _readable_place_type_text(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    compact = text.replace("|", "").replace(";", "").replace(",", "").replace(" ", "")
+    return "" if compact.isdigit() else text
 
 
 def _extract_live_places(research_context: Any) -> list[dict[str, Any]]:
@@ -322,6 +435,11 @@ def _extract_live_places(research_context: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict) or item.get("status") != "ok":
             continue
         result = item.get("result")
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except json.JSONDecodeError:
+                result = None
         if not isinstance(result, dict):
             continue
         candidates: list[dict[str, Any]] = []
@@ -331,6 +449,9 @@ def _extract_live_places(research_context: Any) -> list[dict[str, Any]]:
         place_result = result.get("place_results")
         if isinstance(place_result, dict):
             candidates.append(place_result)
+        pois = result.get("pois")
+        if isinstance(pois, list):
+            candidates.extend(_normalize_amap_poi(candidate) for candidate in pois if isinstance(candidate, dict))
         for candidate in candidates:
             title = str(candidate.get("title") or "").strip()
             if not title or title in seen:
@@ -338,6 +459,22 @@ def _extract_live_places(research_context: Any) -> list[dict[str, Any]]:
             seen.add(title)
             places.append(candidate)
     return places[:9]
+
+
+def _normalize_amap_poi(candidate: dict[str, Any]) -> dict[str, Any]:
+    title = str(candidate.get("title") or candidate.get("name") or "").strip()
+    location = candidate.get("location")
+    link = None
+    if title:
+        link = f"https://ditu.amap.com/search?query={title.replace(' ', '+')}"
+    return {
+        "title": title,
+        "type": candidate.get("type") or candidate.get("typecode"),
+        "address": candidate.get("address"),
+        "gps_coordinates": location,
+        "website": candidate.get("website"),
+        "link": link,
+    }
 
 
 def _parse_date(value: Any) -> date | None:

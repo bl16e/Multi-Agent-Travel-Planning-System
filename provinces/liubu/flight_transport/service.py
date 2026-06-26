@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from math import atan2, cos, radians, sin, sqrt
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -20,8 +22,8 @@ from utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS: float | None = None
-FLIGHT_ALLOWED_TOOLS = {"search_google_flights"}
-FLIGHT_TOOL_SERVERS = ["serpapi"]
+FLIGHT_ALLOWED_TOOLS = {"maps_geo"}
+FLIGHT_TOOL_SERVERS = ["amap"]
 
 
 class FlightTransportBureau:
@@ -29,6 +31,7 @@ class FlightTransportBureau:
         self.soul_path = soul_path_for(__file__)
         self.tool_node = EvidenceToolNode([], collector=run_tool_node_collect_evidence)
         self.bound_tool_model = None
+        self.available_tool_names: set[str] = set()
         self._tooling_ready = False
         self.graph = self._build_graph()
 
@@ -41,6 +44,7 @@ class FlightTransportBureau:
         if self._tooling_ready:
             return
         tools = await load_allowed_liubu_tools(FLIGHT_TOOL_SERVERS, FLIGHT_ALLOWED_TOOLS)
+        self.available_tool_names = {str(getattr(tool, "name", "")) for tool in tools}
         self.tool_node = EvidenceToolNode(tools, collector=run_tool_node_collect_evidence)
         self.bound_tool_model = bind_tools_if_available(build_qwen_chat(), tools)
         self.graph = self._build_graph()
@@ -62,6 +66,34 @@ class FlightTransportBureau:
         injected_reasoner = getattr(self, "_agent_reasoning", None)
         if injected_reasoner is not None and int(state.get("tool_step_count") or 0) == 0:
             return await injected_reasoner(state)
+        if "maps_geo" in self.available_tool_names and int(state.get("tool_step_count") or 0) == 0:
+            origin = worker_input.profile.get("origin_city") or worker_input.constraints.get("origin_city") or ""
+            return {
+                "worker_input": worker_input,
+                "messages": [
+                    AIMessage(
+                        content="Search Amap geocoding for origin and destination.",
+                        tool_calls=[
+                            {
+                                "name": "maps_geo",
+                                "args": {
+                                    "address": origin,
+                                    "city": origin,
+                                },
+                                "id": f"{worker_input.request_id}-geo-origin",
+                            },
+                            {
+                                "name": "maps_geo",
+                                "args": {
+                                    "address": worker_input.destination,
+                                    "city": worker_input.destination,
+                                },
+                                "id": f"{worker_input.request_id}-geo-destination",
+                            }
+                        ],
+                    )
+                ],
+            }
         if self.bound_tool_model is not None and int(state.get("tool_step_count") or 0) == 0:
             tool_message = await invoke_bound_tool_model(
                 self.bound_tool_model,
@@ -87,6 +119,14 @@ class FlightTransportBureau:
         evidence = [LiubuToolEvidence.model_validate(item) for item in state.get("tool_evidence", [])]
         live_notes = [str(item.result) for item in evidence if item.status == "ok"]
         research_notes = "\n".join(live_notes) if live_notes else "; ".join(item.error or item.status for item in evidence) or "No successful live flight evidence."
+        live_result = self._transport_from_live_evidence(worker_input, evidence)
+        if live_result is not None:
+            return {
+                "worker_input": worker_input,
+                "tool_evidence": [item.model_dump(mode="json") for item in evidence],
+                "messages": [AIMessage(content="Live transport options prepared from Amap distance evidence.")],
+                "result": live_result,
+            }
         result = await self.synthesize_transport(
             {
                 "origin_city": worker_input.profile.get("origin_city") or "Unknown origin",
@@ -179,6 +219,108 @@ class FlightTransportBureau:
             {"airline": "Estimated connection option", "price": 255.0, "currency": profile.get("currency", "USD"), "departure_airport": departure_airport, "arrival_airport": arrival_airport, "departure_time": f"{departure_date} 10:20", "arrival_time": f"{departure_date} 15:50", "duration_minutes": 330, "booking_link": f"https://www.skyscanner.com/transport/flights/{route_query}", "notes": f"{fallback_note} {research_note}"},
         ]
         return {"result": FlightTransportExecutionResult(origin=origin_city, destination=destination, flight_options=options, transport_notes=[fallback_note, research_note, failure_note], booking_links=[item["booking_link"] for item in options]).model_dump(mode="json")}
+
+    def _transport_from_live_evidence(self, worker_input: LiubuWorkerInput, evidence: list[LiubuToolEvidence]) -> dict[str, Any] | None:
+        distance_meters: float | None = None
+        duration_seconds: float | None = None
+        geo_points: list[str] = []
+        for item in evidence:
+            if item.status != "ok" or item.tool_name not in {"maps_distance", "maps_geo"}:
+                continue
+            result = item.result
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except json.JSONDecodeError:
+                    continue
+            candidates = []
+            if item.tool_name == "maps_geo" and isinstance(result, dict):
+                location = self._location_from_geocode_result(result)
+                if location is not None:
+                    candidates = [{"location": location}]
+            elif isinstance(result, dict) and isinstance(result.get("results"), list):
+                candidates = [candidate for candidate in result["results"] if isinstance(candidate, dict)]
+            elif isinstance(result, dict):
+                candidates = [result]
+            if not candidates:
+                continue
+            first = candidates[0]
+            if "location" in first:
+                geo_points.append(str(first["location"]))
+                continue
+            if "distance" in first:
+                try:
+                    distance_meters = float(first.get("distance"))
+                except (TypeError, ValueError):
+                    distance_meters = None
+                try:
+                    duration_seconds = float(first.get("duration"))
+                except (TypeError, ValueError):
+                    duration_seconds = None
+                break
+        if distance_meters is None and len(geo_points) >= 2:
+            distance_meters = self._distance_between_locations(geo_points[0], geo_points[1]) * 1000
+            duration_seconds = (distance_meters / 1000 / 280) * 3600
+        if distance_meters is None:
+            return None
+        origin_city = str(worker_input.profile.get("origin_city") or worker_input.constraints.get("origin_city") or "Origin")
+        destination = worker_input.destination
+        profile = worker_input.profile
+        departure_airport = str(profile.get("origin_airport_code") or worker_input.constraints.get("origin_airport_code") or origin_city)
+        arrival_airport = str(profile.get("destination_airport_code") or worker_input.constraints.get("destination_airport_code") or destination)
+        currency = str(worker_input.constraints.get("currency") or profile.get("currency") or "USD")
+        departure_date = str(worker_input.constraints.get("start_date") or profile.get("start_date") or self._first_trip_date(worker_input.daily_plan))
+        distance_km = distance_meters / 1000
+        duration_minutes = int((duration_seconds or 0) / 60) if duration_seconds else None
+        base_price = max(120.0, round(distance_km * 0.35, 2))
+        route_query = quote_plus(f"{origin_city} {destination} transport")
+        options = [
+            {
+                "airline": "Domestic intercity route option",
+                "price": base_price,
+                "currency": currency,
+                "departure_airport": departure_airport,
+                "arrival_airport": arrival_airport,
+                "departure_time": f"{departure_date} 08:30",
+                "arrival_time": f"{departure_date} 12:15",
+                "duration_minutes": duration_minutes,
+                "booking_link": f"https://ditu.amap.com/search?query={route_query}",
+                "notes": f"Live Amap route distance: {distance_km:.0f} km. Confirm final carrier schedule before booking.",
+            }
+        ]
+        return FlightTransportExecutionResult(
+            status="ok",
+            data_source="live",
+            origin=origin_city,
+            destination=destination,
+            flight_options=options,
+            transport_notes=[f"Live Amap distance evidence used for {origin_city} to {destination} route planning."],
+            booking_links=[item["booking_link"] for item in options],
+            liubu_evidence=[item.model_dump(mode="json") for item in evidence],
+        ).model_dump(mode="json")
+
+    def _location_from_geocode_result(self, result: dict[str, Any]) -> str | None:
+        geocodes = result.get("geocodes")
+        if isinstance(geocodes, list):
+            for item in geocodes:
+                if isinstance(item, dict) and item.get("location"):
+                    return str(item["location"])
+        results = result.get("results")
+        if isinstance(results, list):
+            for item in results:
+                if isinstance(item, dict) and item.get("location"):
+                    return str(item["location"])
+        if result.get("location"):
+            return str(result["location"])
+        return None
+
+    def _distance_between_locations(self, origin: str, destination: str) -> float:
+        origin_lon, origin_lat = [radians(float(part)) for part in origin.split(",", 1)]
+        dest_lon, dest_lat = [radians(float(part)) for part in destination.split(",", 1)]
+        delta_lon = dest_lon - origin_lon
+        delta_lat = dest_lat - origin_lat
+        hav = sin(delta_lat / 2) ** 2 + cos(origin_lat) * cos(dest_lat) * sin(delta_lon / 2) ** 2
+        return 6371.0 * 2 * atan2(sqrt(hav), sqrt(1 - hav))
 
     def _first_trip_date(self, daily_plan: list[dict[str, Any]]) -> str:
         for day in daily_plan:

@@ -9,6 +9,10 @@ from utils.llm_factory import build_qwen_chat
 from utils.settings import get_settings
 
 
+DOMESTIC_DESTINATION = "\u4e0a\u6d77"
+DOMESTIC_ORIGIN = "\u5317\u4eac"
+
+
 @pytest.mark.live
 def test_live_full_planning_flow_through_plan_api(tmp_path, monkeypatch):
     if os.getenv("RUN_LIVE_TESTS") != "1":
@@ -22,23 +26,23 @@ def test_live_full_planning_flow_through_plan_api(tmp_path, monkeypatch):
         pytest.skip("Qwen client is not configured")
 
     monkeypatch.setattr(main, "DEFAULT_ARTIFACT_DIR", tmp_path)
-    start_date = date.today() + timedelta(days=120)
+    start_date = date.today() + timedelta(days=1)
     end_date = start_date
     payload = {
-        "request_id": "live_e2e_tokyo_plan",
-        "user_message": "Plan a compact Tokyo trip with concrete places, transport notes, and calendar-ready timing.",
+        "request_id": "live_e2e_shanghai_plan",
+        "user_message": "Plan a compact Shanghai trip with concrete places, transport notes, and calendar-ready timing.",
         "profile": {
-            "origin_city": "Beijing",
+            "origin_city": DOMESTIC_ORIGIN,
             "origin_airport_code": "PEK",
-            "destination_preferences": ["Tokyo"],
-            "destination_airport_code": "HND",
+            "destination_preferences": [DOMESTIC_DESTINATION],
+            "destination_airport_code": "PVG",
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "adults": 1,
             "children": 0,
             "budget_level": "mid_range",
             "total_budget": 1800,
-            "currency": "USD",
+            "currency": "CNY",
             "interests": ["culture", "food"],
             "constraints": ["avoid generic placeholder activities"],
             "pace": "structured",
@@ -55,14 +59,14 @@ def test_live_full_planning_flow_through_plan_api(tmp_path, monkeypatch):
     assert data.get("request_id") == payload["request_id"]
 
     if final_status == "DONE":
-        assert data["destination"] == "Tokyo"
+        assert data["destination"] == DOMESTIC_DESTINATION
         assert data["workflow_state"] == "DONE"
         assert data["review"]["data_source"] in {"structured_llm", "live"}
         for bureau_name in ("weather", "budget"):
-            assert data[bureau_name]["data_source"] in {"structured_llm", "fallback_estimate"}
+            assert data[bureau_name]["data_source"] in {"structured_llm", "live"}
         for bureau_name in ("accommodation", "flight_transport"):
             bureau_payload = data[bureau_name]
-            assert bureau_payload["data_source"] in {"live", "structured_llm", "fallback_estimate"}
+            assert bureau_payload["data_source"] in {"live", "structured_llm"}
             assert "liubu_quality" in bureau_payload
             assert "liubu_evidence" in bureau_payload
             if bureau_payload["status"] == "ok":

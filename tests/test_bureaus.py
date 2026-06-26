@@ -10,6 +10,7 @@ import provinces.liubu.budget.service as budget_service
 import provinces.liubu.calendar.service as calendar_service
 import provinces.liubu.flight_transport.service as flight_service
 import provinces.liubu.weather.service as weather_service
+import provinces.liubu.official_tooling as official_tooling
 from provinces.liubu.accommodation.service import AccommodationBureau
 from provinces.liubu.weather.service import WeatherBureau
 from provinces.liubu.budget.service import BudgetBureau
@@ -146,19 +147,19 @@ async def test_flight_transport_loads_allowed_mcp_tools_and_binds_model(monkeypa
     calls = {"load": [], "bind": 0}
 
     @tool
-    async def search_google_flights(departure_id: str = "PEK") -> str:
-        """Search fake Google Flights results."""
-        return departure_id
+    async def maps_geo(address: str = "Beijing", city: str = "Beijing") -> str:
+        """Search fake Amap geocoding results."""
+        return f"{address}-{city}"
 
     class FakeModel:
         def bind_tools(self, tools):
             calls["bind"] += 1
-            assert [tool.name for tool in tools] == ["search_google_flights"]
+            assert [tool.name for tool in tools] == ["maps_geo"]
             return self
 
     async def fake_load(server_names, allowed_names):
         calls["load"].append((server_names, allowed_names))
-        return [search_google_flights]
+        return [maps_geo]
 
     monkeypatch.setattr(flight_service, "build_qwen_chat", lambda: FakeModel())
     monkeypatch.setattr(flight_service, "load_allowed_liubu_tools", fake_load)
@@ -166,9 +167,9 @@ async def test_flight_transport_loads_allowed_mcp_tools_and_binds_model(monkeypa
 
     await bureau.ensure_live_tooling()
 
-    assert calls["load"] == [(["serpapi"], {"search_google_flights"})]
+    assert calls["load"] == [(["amap"], {"maps_geo"})]
     assert calls["bind"] == 1
-    assert "search_google_flights" in bureau.tool_node.tools_by_name
+    assert "maps_geo" in bureau.tool_node.tools_by_name
 
 
 @pytest.mark.asyncio
@@ -176,19 +177,19 @@ async def test_accommodation_loads_allowed_mcp_tools_and_binds_model(monkeypatch
     calls = {"load": [], "bind": 0}
 
     @tool
-    async def search_google_hotels(query: str = "Tokyo hotel") -> str:
-        """Search fake Google Hotels results."""
+    async def maps_text_search(query: str = "上海 酒店") -> str:
+        """Search fake Amap hotel POI results."""
         return query
 
     class FakeModel:
         def bind_tools(self, tools):
             calls["bind"] += 1
-            assert [tool.name for tool in tools] == ["search_google_hotels"]
+            assert [tool.name for tool in tools] == ["maps_text_search"]
             return self
 
     async def fake_load(server_names, allowed_names):
         calls["load"].append((server_names, allowed_names))
-        return [search_google_hotels]
+        return [maps_text_search]
 
     monkeypatch.setattr(accommodation_service, "build_qwen_chat", lambda: FakeModel())
     monkeypatch.setattr(accommodation_service, "load_allowed_liubu_tools", fake_load)
@@ -196,16 +197,16 @@ async def test_accommodation_loads_allowed_mcp_tools_and_binds_model(monkeypatch
 
     await bureau.ensure_live_tooling()
 
-    assert calls["load"] == [(["serpapi"], {"search_google_hotels"})]
+    assert calls["load"] == [(["amap"], {"maps_text_search"})]
     assert calls["bind"] == 1
-    assert "search_google_hotels" in bureau.tool_node.tools_by_name
+    assert "maps_text_search" in bureau.tool_node.tools_by_name
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("module", "bureau", "expected_tools"),
     [
-        (weather_service, WeatherBureau(), {"search_google_maps", "search_local_places"}),
+        (weather_service, WeatherBureau(), {"maps_weather"}),
         (budget_service, BudgetBureau(), {"search_google_travel", "search_google_hotels", "search_google_flights"}),
         (calendar_service, CalendarBureau(), {"search_google_maps", "search_google_maps_directions", "search_local_places"}),
     ],
@@ -237,7 +238,8 @@ async def test_general_liubu_bureaus_load_allowed_mcp_tools_and_bind_model(modul
 
     await bureau.ensure_live_tooling()
 
-    assert calls["load"] == [(["serpapi"], expected_tools)]
+    expected_servers = ["amap"] if expected_tools == {"maps_weather"} else ["serpapi"]
+    assert calls["load"] == [(expected_servers, expected_tools)]
     assert calls["bind"] == 1
     assert set(bureau.tool_node.tools_by_name) == expected_tools
 
@@ -248,6 +250,26 @@ async def test_weather_bureau():
     result = await bureau.run(_liubu_subtask(_liubu_payload(), "WEATHER"))
     assert result["bureau"] == "WEATHER"
     assert "forecast_days" in result
+
+
+@pytest.mark.asyncio
+async def test_weather_fallback_uses_trip_dates_instead_of_current_date(monkeypatch):
+    monkeypatch.setattr(weather_service, "build_qwen_chat", lambda: None)
+    bureau = WeatherBureau()
+
+    result = await bureau.synthesize_weather(
+        {
+            "destination": "Tokyo",
+            "daily_plan": [
+                {"date": "2026-10-10", "activities": []},
+                {"date": "2026-10-11", "activities": []},
+            ],
+            "research_notes": "offline",
+        }
+    )
+
+    dates = [day["date"] for day in result["result"]["forecast_days"]]
+    assert dates == ["2026-10-10", "2026-10-11"]
 
 
 @pytest.mark.asyncio
@@ -818,3 +840,343 @@ async def test_general_liubu_successful_tool_messages_become_live_evidence(modul
     assert result["data_source"] == "live"
     assert result["liubu_evidence"][0]["tool_name"] == tool_name
     assert result["liubu_evidence"][0]["status"] == "ok"
+
+
+def test_tool_messages_with_tool_exception_are_error_evidence():
+    evidence = official_tooling.tool_messages_to_evidence(
+        [
+            ToolMessage(
+                content='Error: ToolException("Error calling tool search_google_flights")\n Please fix your mistakes.',
+                name="search_google_flights",
+                tool_call_id="tool-error",
+            )
+        ]
+    )
+
+    assert evidence[0].status == "error"
+    assert evidence[0].result is None
+    assert "ToolException" in evidence[0].error
+
+
+@pytest.mark.asyncio
+async def test_weather_amap_tool_message_builds_live_forecast(monkeypatch):
+    async def fake_run_tool_node(tool_node, state):
+        return {
+            "messages": [
+                ToolMessage(
+                    content=(
+                        '{"status":"1","forecasts":[{"city":"\u4e0a\u6d77\u5e02","casts":['
+                        '{"date":"2026-10-24","dayweather":"\u591a\u4e91","nightweather":"\u6674",'
+                        '"daytemp":"24","nighttemp":"18","daypower":"3","nightpower":"3"}]}]}'
+                    ),
+                    name="maps_weather",
+                    tool_call_id="weather-1",
+                )
+            ]
+        }
+
+    class FakeBoundToolModel:
+        async def ainvoke(self, messages):
+            return AIMessage(
+                content="search amap weather",
+                tool_calls=[{"name": "maps_weather", "args": {"city": "\u4e0a\u6d77"}, "id": "weather-1"}],
+            )
+
+    monkeypatch.setattr(weather_service, "build_qwen_chat", lambda: None)
+    monkeypatch.setattr(weather_service, "run_tool_node_collect_evidence", fake_run_tool_node)
+    bureau = WeatherBureau()
+    bureau.bound_tool_model = FakeBoundToolModel()
+    bureau._tooling_ready = True
+    bureau.graph = bureau._build_graph()
+    payload = {
+        "request_id": "weather_amap_live",
+        "approved_draft": {
+            "destination": "\u4e0a\u6d77",
+            "itinerary_draft": {
+                "destination": "\u4e0a\u6d77",
+                "daily_plan": [{"date": "2026-10-24", "activities": []}],
+            },
+        },
+        "execution_plan": {"user_request": {"profile": {"currency": "CNY"}}},
+    }
+
+    result = await bureau.run(_liubu_subtask(payload, "WEATHER"))
+
+    assert result["status"] == "ok"
+    assert result["data_source"] == "live"
+    assert result["forecast_days"][0]["condition"] == "\u591a\u4e91"
+    assert result["forecast_days"][0]["is_estimated"] is False
+    assert not any("fallback" in warning.lower() for warning in result["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_weather_amap_flat_forecast_builds_live_forecast(monkeypatch):
+    async def fake_run_tool_node(tool_node, state):
+        return {
+            "messages": [
+                ToolMessage(
+                    content=(
+                        '{"city":"\u4e0a\u6d77\u5e02","forecasts":['
+                        '{"date":"2026-10-24","dayweather":"\u591a\u4e91","nightweather":"\u6674",'
+                        '"daytemp":"24","nighttemp":"18","daypower":"3","nightpower":"3"}]}'
+                    ),
+                    name="maps_weather",
+                    tool_call_id="weather-1",
+                )
+            ]
+        }
+
+    class FakeBoundToolModel:
+        async def ainvoke(self, messages):
+            return AIMessage(
+                content="search amap weather",
+                tool_calls=[{"name": "maps_weather", "args": {"city": "\u4e0a\u6d77"}, "id": "weather-1"}],
+            )
+
+    monkeypatch.setattr(weather_service, "build_qwen_chat", lambda: None)
+    monkeypatch.setattr(weather_service, "run_tool_node_collect_evidence", fake_run_tool_node)
+    bureau = WeatherBureau()
+    bureau.bound_tool_model = FakeBoundToolModel()
+    bureau._tooling_ready = True
+    bureau.available_tool_names = {"maps_weather"}
+    bureau.graph = bureau._build_graph()
+    payload = {
+        "request_id": "weather_amap_flat_live",
+        "approved_draft": {
+            "destination": "\u4e0a\u6d77",
+            "itinerary_draft": {
+                "destination": "\u4e0a\u6d77",
+                "daily_plan": [{"date": "2026-10-24", "activities": []}],
+            },
+        },
+        "execution_plan": {"user_request": {"profile": {"currency": "CNY"}}},
+    }
+
+    result = await bureau.run(_liubu_subtask(payload, "WEATHER"))
+
+    assert result["status"] == "ok"
+    assert result["data_source"] == "live"
+    assert result["forecast_days"][0]["condition"] == "\u591a\u4e91"
+    assert result["forecast_days"][0]["is_estimated"] is False
+    assert "fallback" not in str(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_budget_from_live_itinerary_has_no_fallback_language(monkeypatch):
+    monkeypatch.setattr(budget_service, "build_qwen_chat", lambda: None)
+    bureau = BudgetBureau()
+    bureau._tooling_ready = True
+    payload = {
+        "request_id": "budget_clean_live_inputs",
+        "approved_draft": {
+            "destination": "\u4e0a\u6d77",
+            "itinerary_draft": {
+                "destination": "\u4e0a\u6d77",
+                "daily_plan": [
+                    {
+                        "date": "2026-10-24",
+                        "activities": [
+                            {
+                                "title": "\u4e0a\u6d77\u535a\u7269\u9986",
+                                "estimated_cost": 30,
+                                "map_link": "https://ditu.amap.com/search?query=shanghai-museum",
+                            }
+                        ],
+                    }
+                ],
+            },
+        },
+        "execution_plan": {
+            "user_request": {
+                "profile": {
+                    "origin_city": "\u5317\u4eac",
+                    "start_date": "2026-10-24",
+                    "end_date": "2026-10-24",
+                    "adults": 1,
+                    "currency": "CNY",
+                    "total_budget": 1800,
+                }
+            }
+        },
+    }
+
+    result = await bureau.run(_liubu_subtask(payload, "BUDGET"))
+
+    assert result["status"] == "ok"
+    assert result["data_source"] == "live"
+    assert "fallback" not in str(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_accommodation_amap_poi_builds_clean_live_options(monkeypatch):
+    async def fake_run_tool_node(tool_node, state):
+        return {
+            "messages": [
+                ToolMessage(
+                    content='{"pois":[{"name":"\u4e0a\u6d77\u5916\u6ee9\u9152\u5e97","address":"\u9ec4\u6d66\u533a","type":"\u4f4f\u5bbf\u670d\u52a1;\u5bbe\u9986\u9152\u5e97","location":"121.49,31.24"}]}',
+                    name="maps_text_search",
+                    tool_call_id="hotel-1",
+                )
+            ]
+        }
+
+    class FakeBoundToolModel:
+        async def ainvoke(self, messages):
+            return AIMessage(
+                content="search amap hotels",
+                tool_calls=[{"name": "maps_text_search", "args": {"keywords": "\u4e0a\u6d77 \u9152\u5e97"}, "id": "hotel-1"}],
+            )
+
+    monkeypatch.setattr(accommodation_service, "build_qwen_chat", lambda: None)
+    monkeypatch.setattr(accommodation_service, "run_tool_node_collect_evidence", fake_run_tool_node)
+    bureau = AccommodationBureau()
+    bureau.bound_tool_model = FakeBoundToolModel()
+    bureau._tooling_ready = True
+    bureau.graph = bureau._build_graph()
+    payload = {
+        "request_id": "hotel_amap_live",
+        "approved_draft": {"destination": "\u4e0a\u6d77", "itinerary_draft": {"destination": "\u4e0a\u6d77", "daily_plan": [{"date": "2026-10-24", "activities": []}]}},
+        "execution_plan": {"user_request": {"profile": {"start_date": "2026-10-24", "end_date": "2026-10-25", "adults": 1, "currency": "CNY"}}},
+    }
+
+    result = await bureau.run(_liubu_subtask(payload, "ACCOMMODATION"))
+
+    assert result["status"] == "ok"
+    assert result["data_source"] == "live"
+    assert result["hotel_options"][0]["name"] == "\u4e0a\u6d77\u5916\u6ee9\u9152\u5e97"
+    assert "fallback" not in str(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_flight_transport_amap_geo_builds_clean_live_options(monkeypatch):
+    async def fake_run_tool_node(tool_node, state):
+        return {
+            "messages": [
+                ToolMessage(
+                    content='{"geocodes":[{"location":"116.4074,39.9042"}]}',
+                    name="maps_geo",
+                    tool_call_id="geo-1",
+                ),
+                ToolMessage(
+                    content='{"geocodes":[{"location":"121.4737,31.2304"}]}',
+                    name="maps_geo",
+                    tool_call_id="geo-2",
+                )
+            ]
+        }
+
+    class FakeBoundToolModel:
+        async def ainvoke(self, messages):
+            return AIMessage(
+                content="search amap geo",
+                tool_calls=[
+                    {"name": "maps_geo", "args": {"address": "\u5317\u4eac"}, "id": "geo-1"},
+                    {"name": "maps_geo", "args": {"address": "\u4e0a\u6d77"}, "id": "geo-2"},
+                ],
+            )
+
+    monkeypatch.setattr(flight_service, "build_qwen_chat", lambda: None)
+    monkeypatch.setattr(flight_service, "run_tool_node_collect_evidence", fake_run_tool_node)
+    bureau = FlightTransportBureau()
+    bureau.bound_tool_model = FakeBoundToolModel()
+    bureau._tooling_ready = True
+    bureau.graph = bureau._build_graph()
+    payload = {
+        "request_id": "transport_amap_live",
+        "approved_draft": {"destination": "\u4e0a\u6d77", "itinerary_draft": {"destination": "\u4e0a\u6d77", "daily_plan": [{"date": "2026-10-24", "activities": []}]}},
+        "execution_plan": {"user_request": {"profile": {"origin_city": "\u5317\u4eac", "origin_airport_code": "PEK", "destination_airport_code": "PVG", "start_date": "2026-10-24", "end_date": "2026-10-24", "adults": 1, "currency": "CNY"}}},
+    }
+
+    result = await bureau.run(_liubu_subtask(payload, "FLIGHT_TRANSPORT"))
+
+    assert result["status"] == "ok"
+    assert result["data_source"] == "live"
+    assert result["flight_options"][0]["departure_airport"] == "PEK"
+    assert result["flight_options"][0]["arrival_airport"] == "PVG"
+    assert "fallback" not in str(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_flight_transport_amap_results_geo_builds_clean_live_options(monkeypatch):
+    async def fake_run_tool_node(tool_node, state):
+        return {
+            "messages": [
+                ToolMessage(
+                    content='{"results":[{"location":"116.407387,39.904179"}]}',
+                    name="maps_geo",
+                    tool_call_id="geo-1",
+                ),
+                ToolMessage(
+                    content='{"results":[{"location":"121.473667,31.230525"}]}',
+                    name="maps_geo",
+                    tool_call_id="geo-2",
+                ),
+            ]
+        }
+
+    class FakeBoundToolModel:
+        async def ainvoke(self, messages):
+            return AIMessage(
+                content="search amap geo",
+                tool_calls=[
+                    {"name": "maps_geo", "args": {"address": "\u5317\u4eac"}, "id": "geo-1"},
+                    {"name": "maps_geo", "args": {"address": "\u4e0a\u6d77"}, "id": "geo-2"},
+                ],
+            )
+
+    monkeypatch.setattr(flight_service, "build_qwen_chat", lambda: None)
+    monkeypatch.setattr(flight_service, "run_tool_node_collect_evidence", fake_run_tool_node)
+    bureau = FlightTransportBureau()
+    bureau.bound_tool_model = FakeBoundToolModel()
+    bureau._tooling_ready = True
+    bureau.graph = bureau._build_graph()
+    payload = {
+        "request_id": "transport_amap_results_live",
+        "approved_draft": {"destination": "\u4e0a\u6d77", "itinerary_draft": {"destination": "\u4e0a\u6d77", "daily_plan": [{"date": "2026-10-24", "activities": []}]}},
+        "execution_plan": {"user_request": {"profile": {"origin_city": "\u5317\u4eac", "origin_airport_code": "PEK", "destination_airport_code": "PVG", "start_date": "2026-10-24", "end_date": "2026-10-24", "adults": 1, "currency": "CNY"}}},
+    }
+
+    result = await bureau.run(_liubu_subtask(payload, "FLIGHT_TRANSPORT"))
+
+    assert result["status"] == "ok"
+    assert result["data_source"] == "live"
+    assert "fallback" not in str(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_calendar_itinerary_derived_complete_events_are_ok_not_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(calendar_service, "build_qwen_chat", lambda: None)
+    bureau = CalendarBureau(output_dir=tmp_path)
+    bureau._tooling_ready = True
+    payload = {
+        "request_id": "calendar_live_itinerary",
+        "approved_draft": {
+            "destination": "\u4e0a\u6d77",
+            "itinerary_draft": {
+                "destination": "\u4e0a\u6d77",
+                "daily_plan": [
+                    {
+                        "date": "2026-10-24",
+                        "activities": [
+                            {
+                                "title": "\u4e0a\u6d77\u535a\u7269\u9986",
+                                "start_time": "09:00",
+                                "end_time": "11:00",
+                                "location_name": "\u4e0a\u6d77\u535a\u7269\u9986",
+                                "description": "Visit a concrete approved itinerary place.",
+                                "map_link": "https://ditu.amap.com/search?query=shanghai-museum",
+                            }
+                        ],
+                    }
+                ],
+            },
+        },
+        "execution_plan": {"user_request": {"profile": {"currency": "CNY"}}},
+    }
+
+    result = await bureau.run(_liubu_subtask(payload, "CALENDAR"))
+
+    assert result["status"] == "ok"
+    assert result["data_source"] == "live"
+    assert result["events_created"] == 1
+    assert not any("fallback" in warning.lower() for warning in result["warnings"])

@@ -219,16 +219,14 @@ class MenxiaReviewAgent:
 
         return ReviewVerdictModel(
             verdict="APPROVED",
-            summary="Live MCP research draft is dispatchable; pending booking, transport, weather, budget, and calendar details are assigned to Liubu execution.",
+            summary="Live MCP research draft is dispatchable; booking, transport, weather, budget, and calendar details are assigned to Liubu execution.",
             approved_bureaus=list(packet.required_bureaus),
             review_notes=[
-                "Liubu will complete pending execution details instead of treating them as Menxia blocking issues.",
+                "Liubu completes execution details instead of treating them as Menxia blocking issues.",
                 "Deterministic live MCP dispatchability guard ran before LLM review.",
             ],
             data_source="live",
-            warnings=[
-                "Draft still has pending execution confirmations; Liubu must verify booking availability, transport duration, weather contingency, budget, and calendar output.",
-            ],
+            warnings=[],
         )
 
     def _is_live_research_fallback(self, draft: dict[str, Any]) -> bool:
@@ -245,10 +243,19 @@ class MenxiaReviewAgent:
             "estimated attraction slot",
             "placeholder recommendation",
             "generic sightseeing",
+            "named local checkpoints",
+            "main visitor district",
+            "venue confirmation block",
+            "input-derived offline plan segment",
+            "replace with live venue details",
         )
         for day in packet.itinerary_draft.daily_plan:
-            if "estimated offline itinerary block" in day.summary.lower():
-                issues.append(f"Day {day.day_index} summary contains generic placeholder wording.")
+            summary = day.summary.lower()
+            if (
+                "estimated offline itinerary block" in summary
+                or "offline estimate for" in summary
+            ):
+                issues.append(f"Day {day.day_index} summary contains generic placeholder/template wording.")
             for activity in day.activities:
                 combined = " ".join(
                     str(value or "")
@@ -259,7 +266,7 @@ class MenxiaReviewAgent:
                     )
                 ).lower()
                 if any(term in combined for term in blocked_terms):
-                    issues.append(f"Day {day.day_index} activity '{activity.title}' contains generic placeholder content.")
+                    issues.append(f"Day {day.day_index} activity '{activity.title}' contains generic placeholder/template content.")
         return issues
 
     def _normalize_draft_packet(self, draft: dict[str, Any]) -> dict[str, Any]:

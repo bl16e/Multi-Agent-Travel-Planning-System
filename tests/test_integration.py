@@ -9,12 +9,13 @@ from utils.schemas import PlanningRequest, TravelerProfile
 async def test_full_workflow_integration():
     """完整工作流集成测试（包含LLM调用）"""
     workflow = ProvinceWorkflow()
+    destination = "\u4e0a\u6d77"
     request = PlanningRequest(
         request_id="test_integration_001",
-        user_message="计划东京3日游",
+        user_message="Plan a 3-day domestic Shanghai trip",
         profile=TravelerProfile(
-            destination_preferences=["Tokyo"],
-            origin_city="Beijing",
+            destination_preferences=[destination],
+            origin_city="\u5317\u4eac",
             start_date="2026-05-01",
             end_date="2026-05-03",
             total_budget=3000,
@@ -29,9 +30,9 @@ async def test_full_workflow_integration():
         assert "final_package" in result
         package = result["final_package"]
         assert package["request_id"] == request.request_id
-        assert package["destination"] == "Tokyo"
+        assert package["destination"] == destination
         assert package["workflow_state"] == "DONE"
-        assert package["itinerary"]["destination"] == "Tokyo"
+        assert package["itinerary"]["destination"] == destination
         assert package["review"]["request_id"] == request.request_id
         assert isinstance(package["booking_links"], list)
         assert isinstance(package["progress_events"], list)
@@ -48,9 +49,9 @@ async def test_full_workflow_integration():
 async def test_final_package_and_artifacts_expose_data_source_labels(tmp_path):
     request = PlanningRequest(
         request_id="artifact_labels",
-        user_message="Plan Kyoto",
+        user_message="Plan Hangzhou",
         profile=TravelerProfile(
-            destination_preferences=["Kyoto"],
+            destination_preferences=["\u676d\u5dde"],
             origin_city="Beijing",
             start_date="2026-05-01",
             end_date="2026-05-01",
@@ -60,25 +61,25 @@ async def test_final_package_and_artifacts_expose_data_source_labels(tmp_path):
     )
     draft_packet = {
         "request_id": request.request_id,
-        "destination": "Kyoto",
+        "destination": "\u676d\u5dde",
         "itinerary_draft": {
-            "destination": "Kyoto",
-            "overview": "Named Kyoto plan",
+            "destination": "\u676d\u5dde",
+            "overview": "Named Hangzhou plan",
             "trip_style": "balanced",
             "daily_plan": [
                 {
                     "day_index": 1,
                     "date": "2026-05-01",
-                    "city": "Kyoto",
+                    "city": "\u676d\u5dde",
                     "theme": "Temples",
                     "summary": "Visit named temples.",
                     "activities": [
                         {
                             "start_time": "09:00",
                             "end_time": "10:30",
-                            "title": "Kiyomizu-dera temple visit",
-                            "location_name": "Kiyomizu-dera",
-                            "description": "Visit the named temple complex.",
+                            "title": "West Lake lakeside walk",
+                            "location_name": "\u676d\u5dde\u897f\u6e56",
+                            "description": "Visit the named West Lake scenic area.",
                             "estimated_cost": 20,
                         }
                     ],
@@ -130,7 +131,7 @@ async def test_final_package_and_artifacts_expose_data_source_labels(tmp_path):
             "bureau": "WEATHER",
             "status": "fallback",
             "data_source": "fallback_estimate",
-            "destination": "Kyoto",
+            "destination": "\u676d\u5dde",
             "forecast_days": [],
             "packing_list": [],
             "warnings": ["offline weather"],
@@ -166,4 +167,5 @@ async def test_final_package_and_artifacts_expose_data_source_labels(tmp_path):
     assert "## Data Sources" in markdown
     assert "WEATHER: fallback / fallback_estimate" in markdown
     assert "Menxia Review: fallback_estimate" in markdown
-    assert "X-MA-DATA-SOURCE:fallback_estimate" in ics
+    assert "X-MA-DATA-SOURCE:" in ics
+    assert "fallback_estimate" in ics

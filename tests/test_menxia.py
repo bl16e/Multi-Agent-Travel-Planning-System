@@ -253,6 +253,63 @@ async def test_verdict_rejects_generic_placeholder_itinerary_items():
 
 
 @pytest.mark.asyncio
+async def test_verdict_rejects_offline_template_route_blocks_from_e2e_output(monkeypatch):
+    async def fail_live_review(**kwargs):
+        raise ValueError("force deterministic review")
+
+    monkeypatch.setattr("provinces.menxia_review.graph.run_structured_synthesis", fail_live_review)
+    agent = MenxiaReviewAgent()
+    result = await agent.verdict(
+        {
+            "request_id": "template_route_reject_001",
+            "parsed_draft": {
+                "request_id": "template_route_reject_001",
+                "destination": "Tokyo",
+                "itinerary_draft": {
+                    "destination": "Tokyo",
+                    "overview": "Offline fallback itinerary generated because live LLM/MCP synthesis was unavailable.",
+                    "trip_style": "balanced",
+                    "daily_plan": [
+                        {
+                            "day_index": 1,
+                            "date": "2026-10-10",
+                            "city": "Tokyo",
+                            "theme": "Tokyo culture",
+                            "summary": "Offline estimate for Tokyo focused on culture; verify live opening hours before booking.",
+                            "activities": [
+                                {
+                                    "start_time": "09:00",
+                                    "end_time": "11:30",
+                                    "title": "Tokyo culture route with named local checkpoints",
+                                    "location_name": "Tokyo main visitor district",
+                                    "description": "Input-derived offline plan segment for culture; replace with live venue details before booking.",
+                                },
+                                {
+                                    "start_time": "14:00",
+                                    "end_time": "16:30",
+                                    "title": "Tokyo culture venue confirmation block",
+                                    "location_name": "Tokyo culture area",
+                                    "description": "Offline estimate derived from traveler interests; confirm named venues, opening hours, and ticket availability.",
+                                },
+                            ],
+                        }
+                    ],
+                },
+                "required_bureaus": ["WEATHER", "BUDGET", "CALENDAR"],
+                "bureau_tasks": [],
+                "governance": {"producer": "ZHONGSHU", "revision_round": 0},
+            },
+            "user_request": {"profile": {"total_budget": 3000, "currency": "USD"}},
+        }
+    )
+
+    verdict = result["verdict_payload"]
+    assert verdict["verdict"] == "REJECTED"
+    assert verdict["approved_bureaus"] == []
+    assert any("template" in issue.lower() or "placeholder" in issue.lower() for issue in verdict["blocking_issues"])
+
+
+@pytest.mark.asyncio
 async def test_verdict_approves_live_mcp_research_draft_for_liubu_completion(monkeypatch):
     called = {"live_review": False}
 
@@ -323,5 +380,5 @@ async def test_verdict_approves_live_mcp_research_draft_for_liubu_completion(mon
     assert verdict["approved_bureaus"] == ["WEATHER", "BUDGET", "ACCOMMODATION", "FLIGHT_TRANSPORT", "CALENDAR"]
     assert called["live_review"] is False
     assert any("Liubu" in note for note in verdict["review_notes"])
-    assert any("pending" in warning.lower() for warning in verdict["warnings"])
+    assert verdict["warnings"] == []
 

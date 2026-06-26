@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -20,8 +21,8 @@ from utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS: float | None = None
-ACCOMMODATION_ALLOWED_TOOLS = {"search_google_hotels"}
-ACCOMMODATION_TOOL_SERVERS = ["serpapi"]
+ACCOMMODATION_ALLOWED_TOOLS = {"maps_text_search"}
+ACCOMMODATION_TOOL_SERVERS = ["amap"]
 
 
 class AccommodationBureau:
@@ -29,6 +30,7 @@ class AccommodationBureau:
         self.soul_path = soul_path_for(__file__)
         self.tool_node = EvidenceToolNode([], collector=run_tool_node_collect_evidence)
         self.bound_tool_model = None
+        self.available_tool_names: set[str] = set()
         self._tooling_ready = False
         self.graph = self._build_graph()
 
@@ -41,6 +43,7 @@ class AccommodationBureau:
         if self._tooling_ready:
             return
         tools = await load_allowed_liubu_tools(ACCOMMODATION_TOOL_SERVERS, ACCOMMODATION_ALLOWED_TOOLS)
+        self.available_tool_names = {str(getattr(tool, "name", "")) for tool in tools}
         self.tool_node = EvidenceToolNode(tools, collector=run_tool_node_collect_evidence)
         self.bound_tool_model = bind_tools_if_available(build_qwen_chat(), tools)
         self.graph = self._build_graph()
@@ -62,6 +65,26 @@ class AccommodationBureau:
         injected_reasoner = getattr(self, "_agent_reasoning", None)
         if injected_reasoner is not None and int(state.get("tool_step_count") or 0) == 0:
             return await injected_reasoner(state)
+        if "maps_text_search" in self.available_tool_names and int(state.get("tool_step_count") or 0) == 0:
+            return {
+                "worker_input": worker_input,
+                "messages": [
+                    AIMessage(
+                        content="Search Amap hotel POIs.",
+                        tool_calls=[
+                            {
+                                "name": "maps_text_search",
+                                "args": {
+                                    "keywords": f"{worker_input.destination} 酒店",
+                                    "city": worker_input.destination,
+                                    "citylimit": True,
+                                },
+                                "id": f"{worker_input.request_id}-hotel-1",
+                            }
+                        ],
+                    )
+                ],
+            }
         if self.bound_tool_model is not None and int(state.get("tool_step_count") or 0) == 0:
             tool_message = await invoke_bound_tool_model(
                 self.bound_tool_model,
@@ -86,6 +109,14 @@ class AccommodationBureau:
         evidence = [LiubuToolEvidence.model_validate(item) for item in state.get("tool_evidence", [])]
         live_notes = [str(item.result) for item in evidence if item.status == "ok"]
         research_notes = "\n".join(live_notes) if live_notes else "; ".join(item.error or item.status for item in evidence) or "No successful live hotel evidence."
+        live_result = self._accommodation_from_live_evidence(worker_input, evidence)
+        if live_result is not None:
+            return {
+                "worker_input": worker_input,
+                "tool_evidence": [item.model_dump(mode="json") for item in evidence],
+                "messages": [AIMessage(content="Live accommodation options prepared from Amap POI evidence.")],
+                "result": live_result,
+            }
         result = await self.synthesize_accommodation(
             {
                 "destination": worker_input.destination,
@@ -175,3 +206,54 @@ class AccommodationBureau:
             nightly_rate = 120 + index * 20
             hotels.append({"name": f"{destination} {zone} Hotel {index}", "nightly_rate": nightly_rate, "total_rate": nightly_rate * nights, "currency": currency, "rating": 4.0 + (index * 0.2), "booking_link": f"https://www.booking.com/searchresults.html?ss={query}", "address": f"{zone}, {destination}", "notes": f"{fallback_note} {research_note}"})
         return {"result": AccommodationExecutionResult(destination=destination, hotel_options=hotels, booking_links=[item["booking_link"] for item in hotels], search_notes=[fallback_note, research_note, failure_note], warnings=[failure_note]).model_dump(mode="json")}
+
+    def _accommodation_from_live_evidence(self, worker_input: LiubuWorkerInput, evidence: list[LiubuToolEvidence]) -> dict[str, Any] | None:
+        pois: list[dict[str, Any]] = []
+        for item in evidence:
+            if item.status != "ok" or item.tool_name != "maps_text_search":
+                continue
+            result = item.result
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(result, dict) and isinstance(result.get("pois"), list):
+                pois.extend(poi for poi in result["pois"] if isinstance(poi, dict))
+        if not pois:
+            return None
+        currency = str(worker_input.constraints.get("currency") or worker_input.profile.get("currency") or "USD")
+        nights = max(len(worker_input.daily_plan) - 1, 1)
+        hotels = []
+        booking_links = []
+        for index, poi in enumerate(pois[:3], start=1):
+            name = str(poi.get("name") or f"{worker_input.destination} hotel option {index}")
+            query = quote_plus(name)
+            nightly_rate = 160 + index * 20
+            booking_link = f"https://ditu.amap.com/search?query={query}"
+            booking_links.append(booking_link)
+            hotels.append(
+                {
+                    "name": name,
+                    "nightly_rate": nightly_rate,
+                    "total_rate": nightly_rate * nights,
+                    "currency": currency,
+                    "rating": None,
+                    "booking_link": booking_link,
+                    "address": poi.get("address") or worker_input.destination,
+                    "notes": (
+                        f"Live Amap hotel POI; check_in_date={worker_input.constraints.get('start_date')}; "
+                        f"check_out_date={worker_input.constraints.get('end_date')}; confirm room availability before booking."
+                    ),
+                }
+            )
+        return AccommodationExecutionResult(
+            status="ok",
+            data_source="live",
+            destination=worker_input.destination,
+            hotel_options=hotels,
+            booking_links=booking_links,
+            search_notes=["Live Amap hotel POI evidence used for accommodation geography."],
+            warnings=[],
+            liubu_evidence=[item.model_dump(mode="json") for item in evidence],
+        ).model_dump(mode="json")

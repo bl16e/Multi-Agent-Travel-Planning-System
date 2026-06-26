@@ -13,18 +13,22 @@ from utils.settings import get_settings
 from workflow import ProvinceWorkflow
 
 
+DOMESTIC_DESTINATION = "\u4e0a\u6d77"
+DOMESTIC_ORIGIN = "\u5317\u4eac"
+
+
 def make_e2e_request(request_id: str, *, total_budget: int | None = None) -> PlanningRequest:
     return PlanningRequest(
         request_id=request_id,
         user_message=(
-            "Plan a concrete Tokyo trip with named places, transport notes, "
+            "Plan a concrete Shanghai trip with named places, transport notes, "
             "budget labels, and calendar-ready timing."
         ),
         profile=TravelerProfile(
-            origin_city="Beijing",
+            origin_city=DOMESTIC_ORIGIN,
             origin_airport_code="PEK",
-            destination_preferences=["Tokyo"],
-            destination_airport_code="HND",
+            destination_preferences=[DOMESTIC_DESTINATION],
+            destination_airport_code="PVG",
             start_date="2026-10-10",
             end_date="2026-10-11",
             total_budget=total_budget,
@@ -67,7 +71,7 @@ def configure_offline_e2e(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_local_workflow_e2e_resumes_and_writes_artifacts(tmp_path, monkeypatch):
+async def test_local_workflow_e2e_rejects_offline_template_without_artifacts(tmp_path, monkeypatch):
     output_dir, _, checkpoint_db = configure_offline_e2e(monkeypatch, tmp_path)
     progress_lines: list[str] = []
     workflow = ProvinceWorkflow(artifact_dir=output_dir, progress_reporter=progress_lines.append)
@@ -86,28 +90,21 @@ async def test_local_workflow_e2e_resumes_and_writes_artifacts(tmp_path, monkeyp
         {"profile_updates": {"total_budget": 2600}},
     )
 
-    assert resumed["status"] == "DONE"
-    package = resumed["final_package"]
-    assert package["request_id"] == request.request_id
-    assert package["workflow_state"] == "DONE"
-    assert package["destination"] == "Tokyo"
-    assert package["review"]["data_source"] == "fallback_estimate"
-    assert package["weather"]["data_source"] == "fallback_estimate"
-    assert package["budget"]["data_source"] == "fallback_estimate"
-    assert package["calendar_file"].endswith("_trip_calendar.ics")
-    assert package["itinerary"]["daily_plan"]
+    assert resumed["status"] == "REJECTED"
+    assert "final_package" not in resumed
+    review = resumed["rejected_payload"]["review"]
+    assert review["verdict"] == "REJECTED"
+    assert any("placeholder/template" in issue for issue in review["blocking_issues"])
 
     markdown_path = output_dir / f"{request.request_id}_travel_plan.md"
     calendar_path = output_dir / f"{request.request_id}_trip_calendar.ics"
-    assert markdown_path.exists()
-    assert calendar_path.exists()
-    assert "## Data Sources" in markdown_path.read_text(encoding="utf-8")
-    assert "X-MA-DATA-SOURCE:fallback_estimate" in calendar_path.read_text(encoding="utf-8")
+    assert not markdown_path.exists()
+    assert not calendar_path.exists()
     assert any("shangshu_preflight" in line for line in progress_lines)
-    assert any("shangshu_assemble" in line for line in progress_lines)
+    assert any("finish_rejected" in line for line in progress_lines)
 
 
-def test_api_e2e_plan_resume_dashboard_and_download(tmp_path, monkeypatch):
+def test_api_e2e_rejects_offline_template_and_download_is_absent(tmp_path, monkeypatch):
     output_dir, session_dir, _ = configure_offline_e2e(monkeypatch, tmp_path)
     monkeypatch.setattr(main, "DEFAULT_ARTIFACT_DIR", output_dir)
     monkeypatch.setattr(main, "_shared_sessions", InMemorySessionCache(max_entries=10, ttl_seconds=3600))
@@ -133,22 +130,18 @@ def test_api_e2e_plan_resume_dashboard_and_download(tmp_path, monkeypatch):
     )
 
     assert resume_response.status_code == 200, resume_response.text
-    final_package = resume_response.json()
-    assert final_package["request_id"] == request.request_id
-    assert final_package["workflow_state"] == "DONE"
-    assert final_package["resume_mode"] == "none"
-    assert final_package["resume_state"] == {}
-    assert final_package["weather"]["data_source"] == "fallback_estimate"
-    assert final_package["budget"]["data_source"] == "fallback_estimate"
-    assert final_package["calendar_file"].endswith("_trip_calendar.ics")
+    rejected = resume_response.json()
+    assert rejected["request_id"] == request.request_id
+    assert rejected["status"] == "REJECTED"
+    assert "workflow_state" not in rejected
+    assert "markdown_file" not in rejected
+    assert rejected["review"]["verdict"] == "REJECTED"
+    assert any("placeholder/template" in issue for issue in rejected["review"]["blocking_issues"])
 
     done_dashboard = client.get(f"/dashboard/{request.request_id}")
     assert done_dashboard.status_code == 200
-    assert done_dashboard.json()["status"] == "DONE"
-    assert done_dashboard.json()["has_package"] is True
+    assert done_dashboard.json()["status"] == "REJECTED"
+    assert done_dashboard.json()["has_package"] is False
 
     markdown_response = client.get(f"/download/{request.request_id}")
-    assert markdown_response.status_code == 200
-    assert markdown_response.headers["content-type"].startswith("text/markdown")
-    assert "## Data Sources" in markdown_response.text
-    assert "WEATHER: fallback / fallback_estimate" in markdown_response.text
+    assert markdown_response.status_code == 404

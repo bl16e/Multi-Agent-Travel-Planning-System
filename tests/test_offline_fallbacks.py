@@ -1,12 +1,26 @@
 import pytest
 
 import utils.agent_runtime as agent_runtime
+import provinces.liubu.accommodation.service as accommodation_service
+import provinces.liubu.budget.service as budget_service
+import provinces.liubu.flight_transport.service as flight_service
 from provinces.liubu.constrained.state import normalize_worker_input
 from provinces.liubu.flight_transport.service import FlightTransportBureau
 from provinces.liubu.accommodation.service import AccommodationBureau
 from provinces.liubu.budget.service import BudgetBureau
 from utils.schemas import ItineraryDraftModel
 from workflow import build_markdown
+
+
+@pytest.fixture(autouse=True)
+def disable_live_dependencies(monkeypatch):
+    async def no_tools(server_names, allowed_names):
+        return []
+
+    for module in (accommodation_service, budget_service, flight_service):
+        monkeypatch.setattr(module, "load_allowed_liubu_tools", no_tools)
+        monkeypatch.setattr(module, "build_qwen_chat", lambda: None)
+    monkeypatch.setattr(agent_runtime, "build_qwen_chat", lambda: None)
 
 
 def _liubu_subtask(payload: dict, bureau: str) -> dict:
@@ -18,8 +32,8 @@ async def test_flight_transport_fallback_is_marked_as_estimated():
     bureau = FlightTransportBureau()
     payload = {
         "approved_draft": {
-            "destination": "Tokyo",
-            "itinerary_draft": {"destination": "Tokyo", "daily_plan": []},
+            "destination": "Shanghai",
+            "itinerary_draft": {"destination": "Shanghai", "daily_plan": []},
         },
         "execution_plan": {
             "user_request": {
@@ -45,9 +59,9 @@ async def test_flight_transport_fallback_uses_trip_date_when_profile_start_date_
     bureau = FlightTransportBureau()
     payload = {
         "approved_draft": {
-            "destination": "Tokyo",
+            "destination": "Shanghai",
             "itinerary_draft": {
-                "destination": "Tokyo",
+                "destination": "Shanghai",
                 "daily_plan": [{"date": "2026-05-01", "activities": []}],
             },
         },
@@ -72,9 +86,9 @@ async def test_accommodation_fallback_uses_trip_night_count():
     bureau = AccommodationBureau()
     payload = {
         "approved_draft": {
-            "destination": "Tokyo",
+            "destination": "Shanghai",
             "itinerary_draft": {
-                "destination": "Tokyo",
+                "destination": "Shanghai",
                 "daily_plan": [
                     {"date": "2026-05-01", "activities": []},
                     {"date": "2026-05-02", "activities": []},
@@ -103,10 +117,10 @@ def test_offline_zhongshu_draft_has_provenance_and_no_generic_placeholders():
     draft = agent_runtime._offline_structured_output(
         ItineraryDraftModel,
         {
-            "destination": "Kyoto",
+            "destination": "Shanghai",
             "start_date": "2026-05-01",
             "end_date": "2026-05-02",
-            "interests": "temples, food",
+            "interests": "culture, food",
             "research_context": agent_runtime.FALLBACK_MESSAGE,
         },
     )
@@ -116,16 +130,16 @@ def test_offline_zhongshu_draft_has_provenance_and_no_generic_placeholders():
     assert "orientation walk" not in serialized
     assert "fallback activity" not in serialized
     assert "estimated attraction slot" not in serialized
-    assert "kyoto" in serialized
+    assert "shanghai" in serialized
 
 
 @pytest.mark.asyncio
 async def test_liubu_fallback_outputs_expose_status_and_data_source():
     payload = {
             "approved_draft": {
-                "destination": "Kyoto",
+                "destination": "Shanghai",
                 "itinerary_draft": {
-                    "destination": "Kyoto",
+                    "destination": "Shanghai",
                     "daily_plan": [{"date": "2026-05-01", "activities": []}],
                 },
             },
@@ -151,7 +165,7 @@ def test_shangshu_markdown_renders_bureau_data_source_labels(tmp_path):
     path = build_markdown(
         request,
         {
-            "destination": "Kyoto",
+            "destination": "Shanghai",
             "itinerary_draft": {
                 "daily_plan": [
                     {
