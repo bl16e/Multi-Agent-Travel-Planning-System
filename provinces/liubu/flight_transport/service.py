@@ -43,7 +43,7 @@ class FlightTransportBureau:
     async def ensure_live_tooling(self) -> None:
         if self._tooling_ready:
             return
-        tools = await load_allowed_liubu_tools(FLIGHT_TOOL_SERVERS, FLIGHT_ALLOWED_TOOLS)
+        tools = await load_allowed_liubu_tools(FLIGHT_TOOL_SERVERS, FLIGHT_ALLOWED_TOOLS, agent="FLIGHT_TRANSPORT")
         self.available_tool_names = {str(getattr(tool, "name", "")) for tool in tools}
         self.tool_node = EvidenceToolNode(tools, collector=run_tool_node_collect_evidence)
         self.bound_tool_model = bind_tools_if_available(build_qwen_chat(), tools)

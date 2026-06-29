@@ -272,7 +272,7 @@ async def test_structured_synthesis_uses_amap_poi_research_context_when_llm_time
             "destination": "\u4e0a\u6d77",
             "start_date": "2026-10-24",
             "end_date": "2026-10-25",
-            "interests": "culture, food",
+            "interests": "\u6587\u5316, \u7f8e\u98df",
             "research_context": research_context,
         },
     )
@@ -281,10 +281,66 @@ async def test_structured_synthesis_uses_amap_poi_research_context_when_llm_time
     assert result.destination == "\u4e0a\u6d77"
     assert "\u4e0a\u6d77\u535a\u7269\u9986" in serialized
     assert "\u5916\u6ee9" in serialized
-    assert "\u4e0a\u6d77 culture route with named local checkpoints" not in serialized
+    assert "\u4e0a\u6d77 \u6587\u5316" not in serialized
     assert "Amap POI result" not in serialized
     assert "110105" not in serialized
     assert "fallback" not in serialized.lower()
+
+
+@pytest.mark.asyncio
+async def test_structured_synthesis_prefers_amap_confirmation_over_serpapi_discovery(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "build_qwen_chat", lambda: FakeLLM())
+    monkeypatch.setattr(agent_runtime, "ChatPromptTemplate", FakePromptTemplate)
+
+    research_context = json.dumps(
+        [
+            {
+                "phase": "discovery",
+                "tool": "search_google_maps",
+                "status": "ok",
+                "result": {
+                    "local_results": [
+                        {
+                            "title": "Generic Shanghai Culture Result",
+                            "type": "Search result",
+                            "address": "Shanghai",
+                        }
+                    ]
+                },
+            },
+            {
+                "phase": "confirmation",
+                "tool": "maps_text_search",
+                "status": "ok",
+                "result": {
+                    "pois": [
+                        {
+                            "name": "\u4e0a\u6d77\u535a\u7269\u9986",
+                            "type": "\u79d1\u6559\u6587\u5316\u670d\u52a1;\u535a\u7269\u9986",
+                            "address": "\u4e0a\u6d77\u5e02\u9ec4\u6d66\u533a\u4eba\u6c11\u5927\u9053201\u53f7",
+                        }
+                    ]
+                },
+            },
+        ]
+    )
+
+    result = await agent_runtime.run_structured_synthesis(
+        soul_path="provinces/zhongshu_itinerary/SOUL.md",
+        output_model=ItineraryDraftModel,
+        user_prompt="ignored",
+        variables={
+            "destination": "\u4e0a\u6d77",
+            "start_date": "2026-10-24",
+            "end_date": "2026-10-24",
+            "interests": "culture",
+            "research_context": research_context,
+        },
+    )
+
+    serialized = result.model_dump_json()
+    assert "\u4e0a\u6d77\u535a\u7269\u9986" in serialized
+    assert "Generic Shanghai Culture Result" not in serialized
 
 
 @pytest.mark.asyncio

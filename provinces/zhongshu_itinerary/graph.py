@@ -9,6 +9,7 @@ from langgraph.graph import END, StateGraph
 
 from utils.agent_runtime import run_structured_synthesis, soul_path_for
 from utils.mcp_client import load_mcp_tools
+from utils.mcp_tool_registry import load_agent_tools
 from utils.schemas import BureauTaskSpec, ItineraryDraftModel, ZhongshuDraftPacketModel
 from utils.settings import get_settings
 
@@ -153,8 +154,13 @@ class ZhongshuItineraryAgent:
             return "Live research skipped: destination missing."
 
         timeout_seconds = get_settings().mcp_tooling_timeout_seconds
+        categories = {
+            "global_place_discovery",
+            "semantic_local_discovery",
+            "domestic_poi_confirmation",
+        }
         try:
-            tools = await load_mcp_tools(["amap"])
+            tools = await load_agent_tools("ZHONGSHU", categories)
         except Exception as exc:
             logger.warning(
                 "Zhongshu live research tool loading failed request_id=%s destination=%s error_type=%s error=%s",
@@ -163,54 +169,106 @@ class ZhongshuItineraryAgent:
                 type(exc).__name__,
                 exc,
             )
-            return f"Live Amap research unavailable: {type(exc).__name__}"
+            return f"Live research unavailable: {type(exc).__name__}"
 
+        discovery_tools = [
+            tool
+            for tool in tools
+            if getattr(tool, "name", None) in {"search_google_maps", "search_local_places"}
+        ]
         text_search = next((tool for tool in tools if getattr(tool, "name", None) == "maps_text_search"), None)
-        if text_search is None:
+        if not discovery_tools:
             logger.info(
-                "Zhongshu live research skipped because maps_text_search is unavailable request_id=%s destination=%s",
+                "Zhongshu live research skipped because SerpAPI discovery tools are unavailable request_id=%s destination=%s",
                 request_id,
                 destination,
             )
-            return "Live Amap research unavailable: maps_text_search missing."
+            return "Live research unavailable: SerpAPI discovery tools missing."
+        if text_search is None:
+            logger.info(
+                "Zhongshu live research skipped because Amap confirmation tool is unavailable request_id=%s destination=%s",
+                request_id,
+                destination,
+            )
+            return "Live research unavailable: Amap maps_text_search missing."
 
         interests = [str(item).strip() for item in normalized.get("interests", []) if str(item).strip()]
         queries = [f"{destination} {interest}" for interest in interests] or [destination]
 
         evidence: list[dict[str, Any]] = []
+        candidates: list[str] = []
         for query in queries[:4]:
-            args = {"keywords": query, "city": destination, "citylimit": True}
+            discovery_tool = discovery_tools[0]
+            tool_name = str(getattr(discovery_tool, "name", "unknown_tool"))
+            args = {"query": query}
+            if tool_name == "search_local_places":
+                args["location"] = destination
             try:
                 logger.info(
-                    "Zhongshu live Amap research invoking maps_text_search request_id=%s destination=%s query=%s",
+                    "Zhongshu live research invoking discovery tool request_id=%s destination=%s tool=%s query=%s",
                     request_id,
                     destination,
+                    tool_name,
                     query,
                 )
-                result = await asyncio.wait_for(text_search.ainvoke(args), timeout=timeout_seconds)
-                evidence.append({"tool": "maps_text_search", "status": "ok", "args": args, "result": result})
+                result = await asyncio.wait_for(discovery_tool.ainvoke(args), timeout=timeout_seconds)
+                decoded = _decode_tool_result(result)
+                evidence.append({"phase": "discovery", "tool": tool_name, "status": "ok", "args": args, "result": decoded})
+                candidates.extend(_extract_candidate_place_names(decoded))
             except asyncio.TimeoutError:
                 logger.warning(
-                    "Zhongshu live Amap research timed out request_id=%s destination=%s query=%s timeout_seconds=%s",
+                    "Zhongshu live research discovery timed out request_id=%s destination=%s query=%s timeout_seconds=%s",
                     request_id,
                     destination,
                     query,
                     timeout_seconds,
                 )
-                evidence.append({"tool": "maps_text_search", "status": "timeout", "args": args})
+                evidence.append({"phase": "discovery", "tool": tool_name, "status": "timeout", "args": args})
             except Exception as exc:
                 logger.warning(
-                    "Zhongshu live Amap research failed request_id=%s destination=%s query=%s error_type=%s error=%s",
+                    "Zhongshu live research discovery failed request_id=%s destination=%s query=%s error_type=%s error=%s",
                     request_id,
                     destination,
                     query,
                     type(exc).__name__,
                     exc,
                 )
-                evidence.append({"tool": "maps_text_search", "status": "error", "args": args, "error": str(exc)})
+                evidence.append({"phase": "discovery", "tool": tool_name, "status": "error", "args": args, "error": str(exc)})
 
-        if not any(item.get("status") == "ok" for item in evidence):
-            return "Live Amap research unavailable: no successful maps_text_search result."
+        confirmed_queries = _dedupe_preserving_order(candidates)[:8]
+        for place_name in confirmed_queries:
+            args = {"keywords": place_name, "city": destination, "citylimit": True}
+            try:
+                logger.info(
+                    "Zhongshu live research invoking Amap confirmation request_id=%s destination=%s place=%s",
+                    request_id,
+                    destination,
+                    place_name,
+                )
+                result = await asyncio.wait_for(text_search.ainvoke(args), timeout=timeout_seconds)
+                evidence.append({"phase": "confirmation", "tool": "maps_text_search", "status": "ok", "args": args, "result": _decode_tool_result(result)})
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Zhongshu live research Amap confirmation timed out request_id=%s destination=%s place=%s timeout_seconds=%s",
+                    request_id,
+                    destination,
+                    place_name,
+                    timeout_seconds,
+                )
+                evidence.append({"phase": "confirmation", "tool": "maps_text_search", "status": "timeout", "args": args})
+            except Exception as exc:
+                logger.warning(
+                    "Zhongshu live research Amap confirmation failed request_id=%s destination=%s place=%s error_type=%s error=%s",
+                    request_id,
+                    destination,
+                    place_name,
+                    type(exc).__name__,
+                    exc,
+                )
+                evidence.append({"phase": "confirmation", "tool": "maps_text_search", "status": "error", "args": args, "error": str(exc)})
+
+        if not any(item.get("phase") == "confirmation" and item.get("status") == "ok" for item in evidence):
+            return "Live research unavailable: no successful SerpAPI-to-Amap confirmed place result."
         return json.dumps(evidence, ensure_ascii=False)
 
     async def decompose_tasks(self, state: ZhongshuState) -> dict[str, Any]:
@@ -268,5 +326,45 @@ class ZhongshuItineraryAgent:
             elif bureau == "FLIGHT_TRANSPORT":
                 tasks.append(BureauTaskSpec(bureau="FLIGHT_TRANSPORT", objective="Recommend inbound, outbound, and key local transport options.", inputs_required=["origin_city", "destination", "start_date", "end_date", "daily_plan"], deliverables=["flight_options", "transport_notes", "booking_links"], priority="medium"))
         return tasks
+
+
+def _decode_tool_result(result: Any) -> Any:
+    if isinstance(result, str):
+        try:
+            return json.loads(result)
+        except json.JSONDecodeError:
+            return result
+    return result
+
+
+def _extract_candidate_place_names(result: Any) -> list[str]:
+    if not isinstance(result, dict):
+        return []
+    candidates: list[str] = []
+    local_results = result.get("local_results")
+    if isinstance(local_results, list):
+        candidates.extend(_place_title(item) for item in local_results if isinstance(item, dict))
+    place_results = result.get("place_results")
+    if isinstance(place_results, dict):
+        candidates.append(_place_title(place_results))
+    organic_results = result.get("organic_results")
+    if isinstance(organic_results, list):
+        candidates.extend(_place_title(item) for item in organic_results if isinstance(item, dict))
+    return [item for item in candidates if item]
+
+
+def _place_title(item: dict[str, Any]) -> str:
+    return str(item.get("title") or item.get("name") or "").strip()
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        output.append(value)
+    return output
 
 

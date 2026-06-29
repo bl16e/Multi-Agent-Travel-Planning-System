@@ -14,7 +14,7 @@ from workflow import build_markdown
 
 @pytest.fixture(autouse=True)
 def disable_live_dependencies(monkeypatch):
-    async def no_tools(server_names, allowed_names):
+    async def no_tools(server_names, allowed_names, *, agent=None):
         return []
 
     for module in (accommodation_service, budget_service, flight_service):

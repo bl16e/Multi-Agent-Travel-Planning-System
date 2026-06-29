@@ -384,7 +384,7 @@ def _live_research_itinerary_draft(
                 "day_index": index + 1,
                 "date": current,
                 "city": destination,
-                "theme": f"{destination} {interest}",
+                "theme": _confirmed_place_theme(interest),
                 "summary": f"基于实时地点检索结果安排 {destination} 行程，并已补充天气、预算、住宿、交通和日历信息。",
                 "activities": activities,
                 "accommodation_note": "Choose a central base near the selected activity cluster.",
@@ -419,6 +419,11 @@ def _readable_place_type_text(value: str) -> str:
     return "" if compact.isdigit() else text
 
 
+def _confirmed_place_theme(interest: str) -> str:
+    label = interest.strip() or "旅行"
+    return f"{label}主题实地行程"
+
+
 def _extract_live_places(research_context: Any) -> list[dict[str, Any]]:
     if not isinstance(research_context, str) or research_context.startswith(FALLBACK_MESSAGE):
         return []
@@ -431,7 +436,13 @@ def _extract_live_places(research_context: Any) -> list[dict[str, Any]]:
 
     places: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for item in payload:
+    confirmation_items = [
+        item
+        for item in payload
+        if isinstance(item, dict) and item.get("phase") == "confirmation" and item.get("status") == "ok"
+    ]
+    source_items = confirmation_items or payload
+    for item in source_items:
         if not isinstance(item, dict) or item.get("status") != "ok":
             continue
         result = item.get("result")

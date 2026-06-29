@@ -1,4 +1,5 @@
 import pytest
+import provinces.liubu.calendar.service as calendar_service
 from provinces.liubu.calendar.service import CalendarBureau
 from provinces.liubu.constrained.state import normalize_worker_input
 from workflow import ProvinceWorkflow
@@ -46,7 +47,13 @@ async def test_full_workflow_integration():
 
 
 @pytest.mark.asyncio
-async def test_final_package_and_artifacts_expose_data_source_labels(tmp_path):
+async def test_final_package_and_artifacts_expose_data_source_labels(tmp_path, monkeypatch):
+    async def no_tools(server_names, allowed_names, *, agent=None):
+        return []
+
+    monkeypatch.setattr(calendar_service, "load_allowed_liubu_tools", no_tools)
+    monkeypatch.setattr(calendar_service, "build_qwen_chat", lambda: None)
+
     request = PlanningRequest(
         request_id="artifact_labels",
         user_message="Plan Hangzhou",

@@ -12,11 +12,14 @@ from langgraph.prebuilt import ToolNode
 from provinces.liubu.constrained.state import LiubuToolEvidence
 from utils.settings import get_settings
 from utils.mcp_client import load_mcp_tools
+from utils.mcp_tool_registry import load_agent_tools_for_names
 
 logger = logging.getLogger(__name__)
 
 
-async def load_allowed_liubu_tools(server_names: list[str], allowed_names: set[str]) -> list[Any]:
+async def load_allowed_liubu_tools(server_names: list[str], allowed_names: set[str], *, agent: str | None = None) -> list[Any]:
+    if agent:
+        return await load_agent_tools_for_names(agent, allowed_names)
     tools = await load_mcp_tools(server_names)
     if not allowed_names:
         return tools

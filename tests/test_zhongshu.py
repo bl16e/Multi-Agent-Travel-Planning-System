@@ -12,6 +12,7 @@ def disable_live_amap_tools(monkeypatch):
         return []
 
     monkeypatch.setattr(zhongshu_graph, "load_mcp_tools", no_tools)
+    monkeypatch.setattr(zhongshu_graph, "load_agent_tools", lambda agent, categories: no_tools([]))
 
 
 @pytest.mark.asyncio
@@ -90,7 +91,7 @@ async def test_draft_itinerary_offline_output_uses_request_destination(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_draft_itinerary_passes_domestic_amap_research_to_synthesis(monkeypatch):
+async def test_draft_itinerary_uses_serpapi_discovery_then_amap_confirmation(monkeypatch):
     seen = {}
 
     async def fake_synthesis(**kwargs):
@@ -123,15 +124,35 @@ async def test_draft_itinerary_passes_domestic_amap_research_to_synthesis(monkey
 
     monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_structured_synthesis", fake_synthesis)
 
+    class FakeSerpApiTool:
+        name = "search_google_maps"
+
+        async def ainvoke(self, args):
+            seen.setdefault("serpapi_args", []).append(args)
+            return {
+                "local_results": [
+                    {
+                        "title": "\u4e0a\u6d77\u535a\u7269\u9986",
+                        "type": "Museum",
+                        "address": "201 Renmin Avenue, Shanghai",
+                    },
+                    {
+                        "title": "\u4e2d\u534e\u827a\u672f\u5bab",
+                        "type": "Art museum",
+                        "address": "Pudong, Shanghai",
+                    },
+                ]
+            }
+
     class FakeAmapTool:
         name = "maps_text_search"
 
         async def ainvoke(self, args):
-            seen.setdefault("tool_args", []).append(args)
+            seen.setdefault("amap_args", []).append(args)
             return {
                 "pois": [
                     {
-                        "name": "\u4e0a\u6d77\u535a\u7269\u9986",
+                        "name": args["keywords"],
                         "type": "\u79d1\u6559\u6587\u5316\u670d\u52a1;\u535a\u7269\u9986",
                         "address": "\u4e0a\u6d77\u5e02\u9ec4\u6d66\u533a\u4eba\u6c11\u5927\u9053201\u53f7",
                         "location": "121.475379,31.228017",
@@ -139,11 +160,12 @@ async def test_draft_itinerary_passes_domestic_amap_research_to_synthesis(monkey
                 ]
             }
 
-    async def fake_load_mcp_tools(server_names):
-        seen["server_names"] = server_names
-        return [FakeAmapTool()]
+    async def fake_load_agent_tools(agent, categories):
+        seen["agent"] = agent
+        seen["categories"] = categories
+        return [FakeSerpApiTool(), FakeAmapTool()]
 
-    monkeypatch.setattr(zhongshu_graph, "load_mcp_tools", fake_load_mcp_tools, raising=False)
+    monkeypatch.setattr(zhongshu_graph, "load_agent_tools", fake_load_agent_tools, raising=False)
 
     agent = ZhongshuItineraryAgent()
     await agent.draft_itinerary(
@@ -168,12 +190,22 @@ async def test_draft_itinerary_passes_domestic_amap_research_to_synthesis(monkey
         }
     )
 
-    assert seen["server_names"] == ["amap"]
-    assert seen["tool_args"][0]["city"] == "\u4e0a\u6d77"
+    assert seen["agent"] == "ZHONGSHU"
+    assert seen["categories"] == {
+        "global_place_discovery",
+        "semantic_local_discovery",
+        "domestic_poi_confirmation",
+    }
+    assert seen["serpapi_args"][0]["query"] == "\u4e0a\u6d77 culture"
+    assert [item["keywords"] for item in seen["amap_args"]] == ["\u4e0a\u6d77\u535a\u7269\u9986", "\u4e2d\u534e\u827a\u672f\u5bab"]
+    assert all(item["keywords"] != "\u4e0a\u6d77 culture" for item in seen["amap_args"])
+    assert all(item["city"] == "\u4e0a\u6d77" for item in seen["amap_args"])
     research_payload = json.loads(seen["variables"]["research_context"])
-    assert research_payload[0]["tool"] == "maps_text_search"
-    assert research_payload[0]["status"] == "ok"
-    assert research_payload[0]["result"]["pois"][0]["name"] == "\u4e0a\u6d77\u535a\u7269\u9986"
+    assert research_payload[0]["phase"] == "discovery"
+    assert research_payload[0]["tool"] == "search_google_maps"
+    confirmation = next(item for item in research_payload if item["phase"] == "confirmation")
+    assert confirmation["tool"] == "maps_text_search"
+    assert confirmation["result"]["pois"][0]["name"] == "\u4e0a\u6d77\u535a\u7269\u9986"
     assert "Direct MCP tool calls removed" not in seen["variables"]["research_context"]
 
 

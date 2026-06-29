@@ -157,8 +157,8 @@ async def test_flight_transport_loads_allowed_mcp_tools_and_binds_model(monkeypa
             assert [tool.name for tool in tools] == ["maps_geo"]
             return self
 
-    async def fake_load(server_names, allowed_names):
-        calls["load"].append((server_names, allowed_names))
+    async def fake_load(server_names, allowed_names, *, agent=None):
+        calls["load"].append((server_names, allowed_names, agent))
         return [maps_geo]
 
     monkeypatch.setattr(flight_service, "build_qwen_chat", lambda: FakeModel())
@@ -167,7 +167,7 @@ async def test_flight_transport_loads_allowed_mcp_tools_and_binds_model(monkeypa
 
     await bureau.ensure_live_tooling()
 
-    assert calls["load"] == [(["amap"], {"maps_geo"})]
+    assert calls["load"] == [(["amap"], {"maps_geo"}, "FLIGHT_TRANSPORT")]
     assert calls["bind"] == 1
     assert "maps_geo" in bureau.tool_node.tools_by_name
 
@@ -187,8 +187,8 @@ async def test_accommodation_loads_allowed_mcp_tools_and_binds_model(monkeypatch
             assert [tool.name for tool in tools] == ["maps_text_search"]
             return self
 
-    async def fake_load(server_names, allowed_names):
-        calls["load"].append((server_names, allowed_names))
+    async def fake_load(server_names, allowed_names, *, agent=None):
+        calls["load"].append((server_names, allowed_names, agent))
         return [maps_text_search]
 
     monkeypatch.setattr(accommodation_service, "build_qwen_chat", lambda: FakeModel())
@@ -197,21 +197,21 @@ async def test_accommodation_loads_allowed_mcp_tools_and_binds_model(monkeypatch
 
     await bureau.ensure_live_tooling()
 
-    assert calls["load"] == [(["amap"], {"maps_text_search"})]
+    assert calls["load"] == [(["amap"], {"maps_text_search"}, "ACCOMMODATION")]
     assert calls["bind"] == 1
     assert "maps_text_search" in bureau.tool_node.tools_by_name
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("module", "bureau", "expected_tools"),
+    ("module", "bureau", "expected_tools", "expected_agent"),
     [
-        (weather_service, WeatherBureau(), {"maps_weather"}),
-        (budget_service, BudgetBureau(), {"search_google_travel", "search_google_hotels", "search_google_flights"}),
-        (calendar_service, CalendarBureau(), {"search_google_maps", "search_google_maps_directions", "search_local_places"}),
+        (weather_service, WeatherBureau(), {"maps_weather"}, "WEATHER"),
+        (budget_service, BudgetBureau(), {"search_google_travel", "search_google_hotels", "search_google_flights"}, "BUDGET"),
+        (calendar_service, CalendarBureau(), {"search_google_maps", "search_google_maps_directions", "search_local_places"}, "CALENDAR"),
     ],
 )
-async def test_general_liubu_bureaus_load_allowed_mcp_tools_and_bind_model(module, bureau, expected_tools, monkeypatch):
+async def test_general_liubu_bureaus_load_allowed_mcp_tools_and_bind_model(module, bureau, expected_tools, expected_agent, monkeypatch):
     calls = {"load": [], "bind": 0}
 
     fake_tools = []
@@ -229,8 +229,8 @@ async def test_general_liubu_bureaus_load_allowed_mcp_tools_and_bind_model(modul
             assert {item.name for item in tools} == expected_tools
             return self
 
-    async def fake_load(server_names, allowed_names):
-        calls["load"].append((server_names, allowed_names))
+    async def fake_load(server_names, allowed_names, *, agent=None):
+        calls["load"].append((server_names, allowed_names, agent))
         return fake_tools
 
     monkeypatch.setattr(module, "build_qwen_chat", lambda: FakeModel())
@@ -239,7 +239,7 @@ async def test_general_liubu_bureaus_load_allowed_mcp_tools_and_bind_model(modul
     await bureau.ensure_live_tooling()
 
     expected_servers = ["amap"] if expected_tools == {"maps_weather"} else ["serpapi"]
-    assert calls["load"] == [(expected_servers, expected_tools)]
+    assert calls["load"] == [(expected_servers, expected_tools, expected_agent)]
     assert calls["bind"] == 1
     assert set(bureau.tool_node.tools_by_name) == expected_tools
 

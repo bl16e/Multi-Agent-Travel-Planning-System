@@ -51,7 +51,7 @@ class BudgetBureau:
     async def ensure_live_tooling(self) -> None:
         if self._tooling_ready:
             return
-        tools = await load_allowed_liubu_tools(BUDGET_TOOL_SERVERS, BUDGET_ALLOWED_TOOLS)
+        tools = await load_allowed_liubu_tools(BUDGET_TOOL_SERVERS, BUDGET_ALLOWED_TOOLS, agent="BUDGET")
         self.tool_node = EvidenceToolNode(tools, collector=run_tool_node_collect_evidence)
         self.bound_tool_model = bind_tools_if_available(build_qwen_chat(), tools)
         self.graph = self._build_graph()
