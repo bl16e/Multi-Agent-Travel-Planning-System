@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
+from typing import Sequence
 
 import httpx
 from fastmcp import FastMCP
@@ -154,5 +156,27 @@ async def search_local_places(query: str, location: str = "") -> dict:
     return await _search(params)
 
 
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--transport", choices=["stdio", "http", "sse", "streamable-http", "streamable_http"], default="stdio")
+    parser.add_argument("--host", default=None)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--path", default=None)
+    args = parser.parse_args(argv)
+
+    transport = args.transport.replace("_", "-")
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+        return
+
+    run_kwargs = {
+        "transport": transport,
+        "host": args.host,
+        "port": args.port,
+        "path": args.path,
+    }
+    mcp.run(**{key: value for key, value in run_kwargs.items() if value is not None})
+
+
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    main()

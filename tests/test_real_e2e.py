@@ -94,7 +94,7 @@ async def test_local_workflow_e2e_rejects_offline_template_without_artifacts(tmp
     assert "final_package" not in resumed
     review = resumed["rejected_payload"]["review"]
     assert review["verdict"] == "REJECTED"
-    assert any("placeholder/template" in issue for issue in review["blocking_issues"])
+    assert any("lacks a map link" in issue for issue in review["blocking_issues"])
 
     markdown_path = output_dir / f"{request.request_id}_travel_plan.md"
     calendar_path = output_dir / f"{request.request_id}_trip_calendar.ics"
@@ -136,7 +136,7 @@ def test_api_e2e_rejects_offline_template_and_download_is_absent(tmp_path, monke
     assert "workflow_state" not in rejected
     assert "markdown_file" not in rejected
     assert rejected["review"]["verdict"] == "REJECTED"
-    assert any("placeholder/template" in issue for issue in rejected["review"]["blocking_issues"])
+    assert any("lacks a map link" in issue for issue in rejected["review"]["blocking_issues"])
 
     done_dashboard = client.get(f"/dashboard/{request.request_id}")
     assert done_dashboard.status_code == 200

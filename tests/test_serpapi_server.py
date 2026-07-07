@@ -36,3 +36,47 @@ async def test_serpapi_search_returns_sanitized_http_error(monkeypatch):
     assert result["http_status"] == 400
     assert "check_in_date" in result["error"]
     assert "secret-key" not in str(result)
+
+
+def test_serpapi_server_main_defaults_to_stdio(monkeypatch):
+    import mcp_servers.serpapi_server as serpapi_server
+
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(serpapi_server.mcp, "run", fake_run)
+
+    serpapi_server.main([])
+
+    assert captured == {"transport": "stdio"}
+
+
+def test_serpapi_server_main_can_start_streamable_http(monkeypatch):
+    import mcp_servers.serpapi_server as serpapi_server
+
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(serpapi_server.mcp, "run", fake_run)
+
+    serpapi_server.main([
+        "--transport",
+        "streamable-http",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8765",
+        "--path",
+        "/mcp",
+    ])
+
+    assert captured == {
+        "transport": "streamable-http",
+        "host": "127.0.0.1",
+        "port": 8765,
+        "path": "/mcp",
+    }

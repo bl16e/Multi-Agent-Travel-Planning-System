@@ -10,6 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
 from utils.llm_factory import build_qwen_chat
+from utils.link_resolver import resolve_place_links
 from utils.schemas import DayPlanModel, ItineraryDraftModel
 from utils.settings import get_settings
 
@@ -275,22 +276,23 @@ def _offline_itinerary_draft(output_model: Any, variables: dict[str, Any]) -> An
     for index in range(day_count):
         current = start + timedelta(days=index)
         interest = interests[index % len(interests)]
-        primary_title = f"{destination} {interest} route with named local checkpoints"
-        secondary_title = f"{destination} {interest} venue confirmation block"
+        theme = _pending_place_theme(interest)
+        primary_title = _pending_place_title(destination, interest, "上午")
+        secondary_title = _pending_place_title(destination, interest, "下午")
         daily_plan.append(
             {
                 "day_index": index + 1,
                 "date": current,
                 "city": destination,
-                "theme": f"{destination} {interest}",
-                "summary": f"Offline estimate for {destination} focused on {interest}; verify live opening hours before booking.",
+                "theme": theme,
+                "summary": f"{destination} 的{theme}需要实时地点检索成功后才能交付；请先恢复 SerpAPI/Amap 确认链路。",
                 "activities": [
                     {
                         "start_time": "09:00",
                         "end_time": "11:30",
                         "title": primary_title,
-                        "location_name": f"{destination} main visitor district",
-                        "description": f"Input-derived offline plan segment for {interest}; replace with live venue details before booking.",
+                        "location_name": f"{destination}待确认活动区域",
+                        "description": "实时地点检索未返回可确认 POI；该时段需在重新检索后替换为真实地点。",
                         "estimated_cost": 0,
                         "status": "pending",
                     },
@@ -298,8 +300,8 @@ def _offline_itinerary_draft(output_model: Any, variables: dict[str, Any]) -> An
                         "start_time": "14:00",
                         "end_time": "16:30",
                         "title": secondary_title,
-                        "location_name": f"{destination} {interest} area",
-                        "description": "Offline estimate derived from traveler interests; confirm named venues, opening hours, and ticket availability.",
+                        "location_name": f"{destination}待确认活动区域",
+                        "description": "实时地点检索未返回可确认 POI；需确认真实名称、营业时间、地址和票务链接后再交付。",
                         "estimated_cost": 40,
                         "status": "pending",
                     },
@@ -312,7 +314,7 @@ def _offline_itinerary_draft(output_model: Any, variables: dict[str, Any]) -> An
         {
             "destination": destination,
             "overview": "Offline fallback itinerary generated because live LLM/MCP synthesis was unavailable.",
-            "trip_style": "balanced",
+            "trip_style": "live_research_fallback",
             "daily_plan": daily_plan,
             "planning_notes": [
                 "Did not use real-time data; verify hours, prices, and booking availability.",
@@ -354,6 +356,7 @@ def _live_research_itinerary_draft(
             address = str(place.get("address") or destination)
             place_type = str(place.get("type") or "place")
             rating = place.get("rating")
+            links = resolve_place_links(place)
             type_text = _readable_place_type_text(place_type)
             detail_parts = [f"{title}，地址：{address}"]
             if type_text:
@@ -367,8 +370,13 @@ def _live_research_itinerary_draft(
                     "title": title,
                     "location_name": address,
                     "description": "；".join(detail_parts) + "。",
-                    "map_link": place.get("link") or f"https://www.google.com/maps/search/?api=1&query={title.replace(' ', '+')}",
-                    "booking_link": place.get("website"),
+                    "map_link": links.get("canonical_url") or links.get("search_url"),
+                    "canonical_url": links.get("canonical_url"),
+                    "search_url": links.get("search_url"),
+                    "link_confidence": links.get("link_confidence"),
+                    "provider": links.get("provider"),
+                    "provider_place_id": links.get("provider_place_id"),
+                    "booking_link": links.get("official_url"),
                     "status": "confirmed",
                     "transport": {
                         "from_location": "previous activity or hotel",
@@ -424,6 +432,16 @@ def _confirmed_place_theme(interest: str) -> str:
     return f"{label}主题实地行程"
 
 
+def _pending_place_theme(interest: str) -> str:
+    label = interest.strip() or "旅行"
+    return f"{label}主题待确认行程"
+
+
+def _pending_place_title(destination: str, interest: str, period: str) -> str:
+    label = interest.strip() or "旅行"
+    return f"{destination}待确认{label}主题{period}地点"
+
+
 def _extract_live_places(research_context: Any) -> list[dict[str, Any]]:
     if not isinstance(research_context, str) or research_context.startswith(FALLBACK_MESSAGE):
         return []
@@ -462,7 +480,11 @@ def _extract_live_places(research_context: Any) -> list[dict[str, Any]]:
             candidates.append(place_result)
         pois = result.get("pois")
         if isinstance(pois, list):
-            candidates.extend(_normalize_amap_poi(candidate) for candidate in pois if isinstance(candidate, dict))
+            source_place = item.get("source_place") if isinstance(item.get("source_place"), dict) else None
+            poi_candidates = pois[:1] if source_place else pois
+            for index, candidate in enumerate(poi_candidates):
+                if isinstance(candidate, dict):
+                    candidates.append(_normalize_amap_poi(candidate, source_place=source_place if index == 0 else None))
         for candidate in candidates:
             title = str(candidate.get("title") or "").strip()
             if not title or title in seen:
@@ -472,19 +494,39 @@ def _extract_live_places(research_context: Any) -> list[dict[str, Any]]:
     return places[:9]
 
 
-def _normalize_amap_poi(candidate: dict[str, Any]) -> dict[str, Any]:
+def _normalize_amap_poi(candidate: dict[str, Any], *, source_place: dict[str, Any] | None = None) -> dict[str, Any]:
+    source_place = source_place or None
+    source_has_provider_evidence = bool(
+        source_place
+        and (
+            source_place.get("place_id")
+            or source_place.get("link")
+            or source_place.get("maps_link")
+            or source_place.get("website")
+        )
+    )
     title = str(candidate.get("title") or candidate.get("name") or "").strip()
+    address = candidate.get("address")
+    place_type = candidate.get("type") or candidate.get("typecode")
     location = candidate.get("location")
-    link = None
-    if title:
-        link = f"https://ditu.amap.com/search?query={title.replace(' ', '+')}"
+    if source_has_provider_evidence:
+        title = str(source_place.get("title") or source_place.get("name") or title).strip()
+        address = source_place.get("address") or address
+        place_type = source_place.get("type") or place_type
+        location = source_place.get("gps_coordinates") or source_place.get("location") or location
+    merged = {**(source_place or {}), **candidate, "title": title}
+    links = resolve_place_links(merged)
     return {
         "title": title,
-        "type": candidate.get("type") or candidate.get("typecode"),
-        "address": candidate.get("address"),
+        "type": place_type,
+        "address": address,
         "gps_coordinates": location,
-        "website": candidate.get("website"),
-        "link": link,
+        "website": links.get("official_url"),
+        "link": links.get("canonical_url"),
+        "search_url": links.get("search_url"),
+        "link_confidence": links.get("link_confidence"),
+        "provider": links.get("provider") or "amap",
+        "provider_place_id": links.get("provider_place_id"),
     }
 
 

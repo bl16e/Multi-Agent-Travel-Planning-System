@@ -176,3 +176,97 @@ async def test_final_package_and_artifacts_expose_data_source_labels(tmp_path, m
     assert "Menxia Review: fallback_estimate" in markdown
     assert "X-MA-DATA-SOURCE:" in ics
     assert "fallback_estimate" in ics
+
+
+def test_markdown_labels_search_fallback_links_transparently(tmp_path):
+    request = PlanningRequest(
+        request_id="link_labels",
+        user_message="Plan Shanghai",
+        profile=TravelerProfile(
+            destination_preferences=["上海"],
+            origin_city="Beijing",
+            start_date="2026-05-01",
+            end_date="2026-05-01",
+            total_budget=3000,
+            currency="USD",
+        ),
+    )
+    draft_packet = {
+        "request_id": request.request_id,
+        "destination": "上海",
+        "itinerary_draft": {
+            "destination": "上海",
+            "overview": "Named Shanghai plan",
+            "trip_style": "balanced",
+            "daily_plan": [
+                {
+                    "day_index": 1,
+                    "date": "2026-05-01",
+                    "city": "上海",
+                    "theme": "Museums",
+                    "summary": "Visit named places.",
+                    "activities": [
+                        {
+                            "start_time": "09:00",
+                            "end_time": "10:30",
+                            "title": "上海博物馆",
+                            "location_name": "上海博物馆",
+                            "description": "A confirmed POI with only a search fallback link.",
+                            "estimated_cost": 0,
+                            "map_link": "https://ditu.amap.com/search?query=%E4%B8%8A%E6%B5%B7%E5%8D%9A%E7%89%A9%E9%A6%86",
+                            "search_url": "https://ditu.amap.com/search?query=%E4%B8%8A%E6%B5%B7%E5%8D%9A%E7%89%A9%E9%A6%86",
+                            "link_confidence": "search_fallback",
+                        },
+                        {
+                            "start_time": "11:00",
+                            "end_time": "12:00",
+                            "title": "Shanghai Museum",
+                            "location_name": "上海博物馆",
+                            "description": "A provider result with a real map link and official site.",
+                            "estimated_cost": 0,
+                            "map_link": "https://www.google.com/maps/place/Shanghai+Museum",
+                            "booking_link": "https://www.shanghaimuseum.net/",
+                            "link_confidence": "provider_result",
+                        },
+                    ],
+                }
+            ],
+            "planning_notes": [],
+            "pending_confirmations": [],
+            "risk_flags": [],
+        },
+    }
+    review_packet = {
+        "request_id": request.request_id,
+        "verdict": "APPROVED",
+        "summary": "Approved link label fixture.",
+        "blocking_issues": [],
+        "revision_requests": [],
+        "human_questions": [],
+        "approved_bureaus": [],
+        "governance": {
+            "reviewer": "MENXIA",
+            "source_producer": "ZHONGSHU",
+            "next_hop": "SHANGSHU",
+            "verdict_state": "APPROVED",
+            "veto_enabled": True,
+            "rejection_round": 0,
+            "max_rejection_rounds": 2,
+        },
+        "data_source": "live",
+    }
+
+    package = ProvinceWorkflow.build_final_package(
+        request,
+        {"dashboard_url": "http://testserver/dashboard/link_labels", "progress_events": []},
+        draft_packet,
+        review_packet,
+        {},
+        tmp_path,
+    )
+
+    markdown = package.markdown_file.read_text(encoding="utf-8")
+    assert "[Search](https://ditu.amap.com/search?query=%E4%B8%8A%E6%B5%B7%E5%8D%9A%E7%89%A9%E9%A6%86)" in markdown
+    assert "[Map](https://ditu.amap.com/search?query=%E4%B8%8A%E6%B5%B7%E5%8D%9A%E7%89%A9%E9%A6%86)" not in markdown
+    assert "[Map](https://www.google.com/maps/place/Shanghai+Museum)" in markdown
+    assert "[Official](https://www.shanghaimuseum.net/)" in markdown

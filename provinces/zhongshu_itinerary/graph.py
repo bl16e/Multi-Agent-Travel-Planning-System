@@ -10,7 +10,13 @@ from langgraph.graph import END, StateGraph
 from utils.agent_runtime import run_structured_synthesis, soul_path_for
 from utils.mcp_client import load_mcp_tools
 from utils.mcp_tool_registry import load_agent_tools
-from utils.schemas import BureauTaskSpec, ItineraryDraftModel, ZhongshuDraftPacketModel
+from utils.schemas import (
+    BureauTaskSpec,
+    ItineraryDraftModel,
+    SerpApiCandidateSelectionModel,
+    SerpApiQueryPlanModel,
+    ZhongshuDraftPacketModel,
+)
 from utils.settings import get_settings
 
 
@@ -192,17 +198,18 @@ class ZhongshuItineraryAgent:
             )
             return "Live research unavailable: Amap maps_text_search missing."
 
-        interests = [str(item).strip() for item in normalized.get("interests", []) if str(item).strip()]
-        queries = [f"{destination} {interest}" for interest in interests] or [destination]
-
         evidence: list[dict[str, Any]] = []
-        candidates: list[str] = []
-        for query in queries[:4]:
-            discovery_tool = discovery_tools[0]
+        planned_queries = await self._plan_serpapi_queries(normalized, discovery_tools, evidence)
+        candidates_by_id: dict[str, dict[str, Any]] = {}
+        for query_index, planned in enumerate(planned_queries):
+            tool_name = str(planned.get("tool") or "search_google_maps")
+            discovery_tool = next((tool for tool in discovery_tools if getattr(tool, "name", None) == tool_name), discovery_tools[0])
             tool_name = str(getattr(discovery_tool, "name", "unknown_tool"))
+            query = str(planned.get("query") or destination).strip()
             args = {"query": query}
+            location = str(planned.get("location") or "").strip()
             if tool_name == "search_local_places":
-                args["location"] = destination
+                args["location"] = location or destination
             try:
                 logger.info(
                     "Zhongshu live research invoking discovery tool request_id=%s destination=%s tool=%s query=%s",
@@ -213,8 +220,13 @@ class ZhongshuItineraryAgent:
                 )
                 result = await asyncio.wait_for(discovery_tool.ainvoke(args), timeout=timeout_seconds)
                 decoded = _decode_tool_result(result)
-                evidence.append({"phase": "discovery", "tool": tool_name, "status": "ok", "args": args, "result": decoded})
-                candidates.extend(_extract_candidate_place_names(decoded))
+                result_candidates: dict[str, dict[str, Any]] = {}
+                for result_index, candidate in enumerate(_extract_candidate_places(decoded)):
+                    candidate_id = f"{tool_name}:{query_index}:{result_index}"
+                    enriched = {**candidate, "_candidate_id": candidate_id}
+                    candidates_by_id[candidate_id] = enriched
+                    result_candidates[candidate_id] = enriched
+                evidence.append({"phase": "discovery", "tool": tool_name, "status": "ok", "args": args, "result": {"candidates": _candidate_summaries(result_candidates)}})
             except asyncio.TimeoutError:
                 logger.warning(
                     "Zhongshu live research discovery timed out request_id=%s destination=%s query=%s timeout_seconds=%s",
@@ -235,8 +247,11 @@ class ZhongshuItineraryAgent:
                 )
                 evidence.append({"phase": "discovery", "tool": tool_name, "status": "error", "args": args, "error": str(exc)})
 
-        confirmed_queries = _dedupe_preserving_order(candidates)[:8]
-        for place_name in confirmed_queries:
+        confirmed_places = await self._select_serpapi_candidates(normalized, candidates_by_id, evidence)
+        for source_place in confirmed_places:
+            place_name = str(source_place.get("title") or source_place.get("name") or "").strip()
+            if not place_name:
+                continue
             args = {"keywords": place_name, "city": destination, "citylimit": True}
             try:
                 logger.info(
@@ -246,7 +261,7 @@ class ZhongshuItineraryAgent:
                     place_name,
                 )
                 result = await asyncio.wait_for(text_search.ainvoke(args), timeout=timeout_seconds)
-                evidence.append({"phase": "confirmation", "tool": "maps_text_search", "status": "ok", "args": args, "result": _decode_tool_result(result)})
+                evidence.append({"phase": "confirmation", "tool": "maps_text_search", "status": "ok", "args": args, "source_place": source_place, "result": _decode_tool_result(result)})
             except asyncio.TimeoutError:
                 logger.warning(
                     "Zhongshu live research Amap confirmation timed out request_id=%s destination=%s place=%s timeout_seconds=%s",
@@ -270,6 +285,93 @@ class ZhongshuItineraryAgent:
         if not any(item.get("phase") == "confirmation" and item.get("status") == "ok" for item in evidence):
             return "Live research unavailable: no successful SerpAPI-to-Amap confirmed place result."
         return json.dumps(evidence, ensure_ascii=False)
+
+    async def _plan_serpapi_queries(
+        self,
+        normalized: dict[str, Any],
+        discovery_tools: list[Any],
+        evidence: list[dict[str, Any]],
+    ) -> list[dict[str, str]]:
+        destination = str(normalized.get("destination") or "").strip()
+        available_tools = [str(getattr(tool, "name", "")) for tool in discovery_tools if getattr(tool, "name", "")]
+        interests = [str(item).strip() for item in normalized.get("interests", []) if str(item).strip()]
+        try:
+            plan = await run_structured_synthesis(
+                soul_path=self.soul_path,
+                output_model=SerpApiQueryPlanModel,
+                user_prompt=(
+                    "你是中书省旅行研究员。请生成 SerpAPI 检索计划，不要硬拼目的地和兴趣词。\n"
+                    "目的地: {destination}\n兴趣: {interests}\n约束: {constraints}\n用户原文: {user_message}\n"
+                    "可用工具: {available_tools}\n"
+                    "返回 2-4 个适合发现真实 POI 的 query，优先能找到具体地点、官网或 provider place_id 的查询。"
+                ),
+                variables={
+                    "destination": destination,
+                    "interests": ", ".join(interests),
+                    "constraints": ", ".join(str(item) for item in normalized.get("constraints", [])),
+                    "user_message": normalized.get("user_message", ""),
+                    "available_tools": ", ".join(available_tools),
+                },
+            )
+            queries = [
+                item.model_dump(mode="json")
+                for item in plan.queries
+                if item.query.strip() and item.tool in available_tools
+            ][:4]
+            if queries:
+                evidence.append({"phase": "query_planning", "status": "ok", "result": plan.model_dump(mode="json")})
+                return queries
+        except Exception as exc:
+            evidence.append({"phase": "query_planning", "status": "error", "error": str(exc)})
+
+        fallback = [{"tool": available_tools[0] if available_tools else "search_google_maps", "query": f"{destination} {interest}", "location": destination, "reason": "deterministic fallback"} for interest in interests[:4]]
+        if not fallback:
+            fallback = [{"tool": available_tools[0] if available_tools else "search_google_maps", "query": destination, "location": destination, "reason": "deterministic fallback"}]
+        evidence.append({"phase": "query_planning_fallback", "status": "fallback", "result": fallback})
+        return fallback
+
+    async def _select_serpapi_candidates(
+        self,
+        normalized: dict[str, Any],
+        candidates_by_id: dict[str, dict[str, Any]],
+        evidence: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not candidates_by_id:
+            evidence.append({"phase": "candidate_selection", "status": "empty", "result": []})
+            return []
+        selection_candidates = _candidate_dict_for_selection(normalized, candidates_by_id)
+        summaries = _candidate_summaries(selection_candidates)
+        try:
+            selection = await run_structured_synthesis(
+                soul_path=self.soul_path,
+                output_model=SerpApiCandidateSelectionModel,
+                user_prompt=(
+                    "你是中书省旅行研究员。请从 SerpAPI 候选中选择要交给高德确认的真实 POI。\n"
+                    "目的地: {destination}\n兴趣: {interests}\n约束: {constraints}\n候选摘要 JSON: {candidate_summaries}\n"
+                    "只返回候选中已有的 candidate_id，不要编造地点或链接。排除停车场、泛商业楼、低相关或非旅行 POI。"
+                ),
+                variables={
+                    "destination": normalized.get("destination", ""),
+                    "interests": ", ".join(str(item) for item in normalized.get("interests", [])),
+                    "constraints": ", ".join(str(item) for item in normalized.get("constraints", [])),
+                    "candidate_summaries": json.dumps(summaries, ensure_ascii=False),
+                },
+            )
+            selected: list[dict[str, Any]] = []
+            for item in selection.selected_candidates:
+                candidate = selection_candidates.get(item.candidate_id) or candidates_by_id.get(item.candidate_id)
+                if candidate is not None:
+                    selected.append(candidate)
+            selected = _dedupe_places(selected)[:8]
+            if selected:
+                evidence.append({"phase": "candidate_selection", "status": "ok", "result": selection.model_dump(mode="json")})
+                return selected
+        except Exception as exc:
+            evidence.append({"phase": "candidate_selection", "status": "error", "error": str(exc)})
+
+        fallback = _fallback_relevant_candidates(normalized, list(candidates_by_id.values()))[:8]
+        evidence.append({"phase": "candidate_selection_fallback", "status": "fallback", "result": _candidate_summaries({str(item.get("_candidate_id") or index): item for index, item in enumerate(fallback)})})
+        return fallback
 
     async def decompose_tasks(self, state: ZhongshuState) -> dict[str, Any]:
         draft = ItineraryDraftModel.model_validate(state["draft"])
@@ -337,34 +439,90 @@ def _decode_tool_result(result: Any) -> Any:
     return result
 
 
-def _extract_candidate_place_names(result: Any) -> list[str]:
+def _extract_candidate_places(result: Any) -> list[dict[str, Any]]:
     if not isinstance(result, dict):
         return []
-    candidates: list[str] = []
+    candidates: list[dict[str, Any]] = []
     local_results = result.get("local_results")
     if isinstance(local_results, list):
-        candidates.extend(_place_title(item) for item in local_results if isinstance(item, dict))
+        candidates.extend(item for item in local_results if isinstance(item, dict) and _place_title(item))
     place_results = result.get("place_results")
-    if isinstance(place_results, dict):
-        candidates.append(_place_title(place_results))
+    if isinstance(place_results, dict) and _place_title(place_results):
+        candidates.append(place_results)
     organic_results = result.get("organic_results")
     if isinstance(organic_results, list):
-        candidates.extend(_place_title(item) for item in organic_results if isinstance(item, dict))
-    return [item for item in candidates if item]
+        candidates.extend(item for item in organic_results if isinstance(item, dict) and _place_title(item))
+    return candidates
 
 
 def _place_title(item: dict[str, Any]) -> str:
     return str(item.get("title") or item.get("name") or "").strip()
 
 
-def _dedupe_preserving_order(values: list[str]) -> list[str]:
+def _dedupe_places(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
-    output: list[str] = []
+    output: list[dict[str, Any]] = []
     for value in values:
-        if value in seen:
+        title = _place_title(value)
+        if title in seen:
             continue
-        seen.add(value)
+        seen.add(title)
         output.append(value)
     return output
+
+
+def _candidate_summaries(candidates_by_id: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for candidate_id, item in candidates_by_id.items():
+        summaries.append(
+            {
+                "candidate_id": candidate_id,
+                "title": item.get("title") or item.get("name"),
+                "type": item.get("type"),
+                "address": item.get("address"),
+                "rating": item.get("rating"),
+                "reviews": item.get("reviews"),
+                "place_id": item.get("place_id"),
+                "website": item.get("website"),
+                "gps_coordinates": item.get("gps_coordinates"),
+            }
+        )
+    return summaries
+
+
+def _fallback_relevant_candidates(normalized: dict[str, Any], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped = _dedupe_places(candidates)
+    scored = [(_candidate_relevance_score(normalized, item), index, item) for index, item in enumerate(deduped)]
+    positive = [(score, index, item) for score, index, item in scored if score > 0]
+    if not positive:
+        return deduped[:8]
+    positive.sort(key=lambda value: (-value[0], value[1]))
+    return [item for _, _, item in positive]
+
+
+def _candidate_dict_for_selection(normalized: dict[str, Any], candidates_by_id: dict[str, dict[str, Any]], *, limit: int = 16) -> dict[str, dict[str, Any]]:
+    ranked = _fallback_relevant_candidates(normalized, list(candidates_by_id.values()))[:limit]
+    return {str(item.get("_candidate_id")): item for item in ranked if item.get("_candidate_id")}
+
+
+def _candidate_relevance_score(normalized: dict[str, Any], item: dict[str, Any]) -> int:
+    text = " ".join(str(item.get(key) or "") for key in ("title", "name", "type", "address")).lower()
+    if any(term in text for term in ("garage", "parking", "car park", "hotel", "lounge", "bar", "restaurant")):
+        return -10
+    score = 0
+    if item.get("place_id"):
+        score += 1
+    if item.get("website"):
+        score += 1
+    interests = " ".join(str(value).lower() for value in normalized.get("interests", []))
+    if any(term in interests for term in ("文化", "culture", "museum", "art", "历史")):
+        for term in ("museum", "博物馆", "art", "美术馆", "gallery", "history", "历史", "garden", "园", "landmark", "文化"):
+            if term in text:
+                score += 4
+    if any(term in interests for term in ("food", "美食", "餐", "小吃")):
+        for term in ("food", "restaurant", "market", "street", "小吃", "餐", "美食", "夜市"):
+            if term in text:
+                score += 4
+    return score
 
 

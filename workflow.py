@@ -921,9 +921,11 @@ def build_markdown(request: PlanningRequest, draft_packet: dict[str, Any], revie
         for activity in day["activities"]:
             line = f"- {activity['start_time']}-{activity['end_time']} {activity['title']} | {activity['location_name']}"
             if activity.get("map_link"):
-                line += f" | [Map]({activity['map_link']})"
+                map_label = "Search" if activity.get("link_confidence") == "search_fallback" else "Map"
+                line += f" | [{map_label}]({activity['map_link']})"
             if activity.get("booking_link"):
-                line += f" | [Booking]({activity['booking_link']})"
+                booking_label = "Official" if activity.get("link_confidence") in {"canonical", "provider_result"} else "Booking"
+                line += f" | [{booking_label}]({activity['booking_link']})"
             lines.append(line)
             lines.append(f"  - {activity['description']}")
         lines.append("")

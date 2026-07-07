@@ -225,7 +225,7 @@ async def test_structured_synthesis_uses_live_research_context_when_llm_times_ou
     assert "Senso-ji Temple" in serialized
     assert "Tokyo National Museum" in serialized
     assert "Tokyo food route with named local checkpoints" not in serialized
-    assert "fallback" not in serialized.lower()
+    assert "fallback_estimate" not in serialized.lower()
 
 
 @pytest.mark.asyncio
@@ -284,7 +284,7 @@ async def test_structured_synthesis_uses_amap_poi_research_context_when_llm_time
     assert "\u4e0a\u6d77 \u6587\u5316" not in serialized
     assert "Amap POI result" not in serialized
     assert "110105" not in serialized
-    assert "fallback" not in serialized.lower()
+    assert "fallback_estimate" not in serialized.lower()
 
 
 @pytest.mark.asyncio
@@ -341,6 +341,120 @@ async def test_structured_synthesis_prefers_amap_confirmation_over_serpapi_disco
     serialized = result.model_dump_json()
     assert "\u4e0a\u6d77\u535a\u7269\u9986" in serialized
     assert "Generic Shanghai Culture Result" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_structured_synthesis_preserves_real_links_from_discovery_after_amap_confirmation(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "build_qwen_chat", lambda: FakeLLM())
+    monkeypatch.setattr(agent_runtime, "ChatPromptTemplate", FakePromptTemplate)
+
+    research_context = json.dumps(
+        [
+            {
+                "phase": "confirmation",
+                "tool": "maps_text_search",
+                "status": "ok",
+                "source_place": {
+                    "title": "Shanghai Museum",
+                    "link": "https://www.google.com/maps/place/Shanghai+Museum",
+                    "website": "https://www.shanghaimuseum.net/",
+                },
+                "result": {
+                    "pois": [
+                        {
+                            "name": "\u4e0a\u6d77\u535a\u7269\u9986",
+                            "type": "\u79d1\u6559\u6587\u5316\u670d\u52a1;\u535a\u7269\u9986",
+                            "address": "\u4e0a\u6d77\u5e02\u9ec4\u6d66\u533a\u4eba\u6c11\u5927\u9053201\u53f7",
+                            "id": "B00155K7R6",
+                        }
+                    ]
+                },
+            }
+        ]
+    )
+
+    result = await agent_runtime.run_structured_synthesis(
+        soul_path="provinces/zhongshu_itinerary/SOUL.md",
+        output_model=ItineraryDraftModel,
+        user_prompt="ignored",
+        variables={
+            "destination": "\u4e0a\u6d77",
+            "start_date": "2026-10-24",
+            "end_date": "2026-10-24",
+            "interests": "\u6587\u5316",
+            "research_context": research_context,
+        },
+    )
+
+    activity = result.daily_plan[0].activities[0]
+    assert str(activity.map_link) == "https://www.google.com/maps/place/Shanghai+Museum"
+    assert str(activity.booking_link) == "https://www.shanghaimuseum.net/"
+    assert activity.link_confidence == "provider_result"
+    assert str(activity.search_url) == "https://ditu.amap.com/search?query=Shanghai+Museum"
+    assert activity.provider_place_id == "B00155K7R6"
+
+
+def test_live_place_extraction_does_not_duplicate_source_place_id_across_amap_pois():
+    research_context = json.dumps(
+        [
+            {
+                "phase": "confirmation",
+                "tool": "maps_text_search",
+                "status": "ok",
+                "source_place": {
+                    "title": "Shanghai Museum",
+                    "place_id": "ChIJPWUSbWlwsjURbNvIw3tOTE0",
+                    "website": "http://www.shanghaimuseum.net/",
+                },
+                "result": {
+                    "pois": [
+                        {"name": "\u4e0a\u6d77\u535a\u7269\u9986", "address": "\u4eba\u6c11\u5927\u9053201\u53f7", "id": "B001"},
+                        {"name": "\u4eba\u6c11\u5e7f\u573a", "address": "\u4eba\u6c11\u5e7f\u573a", "id": "B002"},
+                    ]
+                },
+            }
+        ]
+    )
+
+    places = agent_runtime._extract_live_places(research_context)
+
+    assert places[0]["provider_place_id"] == "ChIJPWUSbWlwsjURbNvIw3tOTE0"
+    assert "query_place_id=ChIJPWUSbWlwsjURbNvIw3tOTE0" in places[0]["link"]
+    assert len(places) == 1
+
+
+def test_live_place_extraction_keeps_source_place_when_amap_confirmation_mismatches():
+    research_context = json.dumps(
+        [
+            {
+                "phase": "confirmation",
+                "tool": "maps_text_search",
+                "status": "ok",
+                "source_place": {
+                    "title": "Shanghai Museum",
+                    "address": "201 Renmin Ave, People's Square, Huangpu, China, 200003",
+                    "place_id": "ChIJPWUSbWlwsjURbNvIw3tOTE0",
+                    "website": "http://www.shanghaimuseum.net/",
+                },
+                "result": {
+                    "pois": [
+                        {
+                            "name": "\u4e0a\u6d77\u81ea\u7136\u535a\u7269\u9986",
+                            "address": "\u5317\u4eac\u897f\u8def510\u53f7",
+                            "id": "B00156NVZG",
+                        }
+                    ]
+                },
+            }
+        ]
+    )
+
+    places = agent_runtime._extract_live_places(research_context)
+
+    assert places[0]["title"] == "Shanghai Museum"
+    assert places[0]["address"] == "201 Renmin Ave, People's Square, Huangpu, China, 200003"
+    assert "query_place_id=ChIJPWUSbWlwsjURbNvIw3tOTE0" in places[0]["link"]
+    assert places[0]["website"] == "http://www.shanghaimuseum.net/"
 
 
 @pytest.mark.asyncio
@@ -403,6 +517,30 @@ async def test_structured_synthesis_falls_back_when_live_structured_setup_fails(
 
     assert result.destination == "Kyoto"
     assert len(result.daily_plan) == 1
+
+
+@pytest.mark.asyncio
+async def test_offline_itinerary_fallback_avoids_keyword_matched_placeholder_titles(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "build_qwen_chat", lambda: FailingStructuredLLM())
+
+    result = await agent_runtime.run_structured_synthesis(
+        soul_path="provinces/zhongshu_itinerary/SOUL.md",
+        output_model=ItineraryDraftModel,
+        user_prompt="ignored",
+        variables={
+            "destination": "\u4e0a\u6d77",
+            "start_date": "2026-10-27",
+            "end_date": "2026-10-27",
+            "interests": "\u6587\u5316, \u7f8e\u98df",
+            "research_context": "Live research unavailable: no successful SerpAPI-to-Amap confirmed place result.",
+        },
+    )
+
+    serialized = result.model_dump_json()
+    assert "\u4e0a\u6d77 \u6587\u5316" not in serialized
+    assert "route with named local checkpoints" not in serialized
+    assert "venue confirmation block" not in serialized
+    assert result.daily_plan[0].theme == "\u6587\u5316\u4e3b\u9898\u5f85\u786e\u8ba4\u884c\u7a0b"
 
 
 @pytest.mark.asyncio

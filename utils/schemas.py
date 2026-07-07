@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 ExecutionStatus = Literal["ok", "fallback", "error"]
 DataSource = Literal["live", "structured_llm", "fallback_estimate", "unavailable"]
+LinkConfidence = Literal["canonical", "provider_result", "search_fallback", "unavailable"]
 
 
 class AgentRole(StrEnum):
@@ -128,6 +129,11 @@ class ActivityModel(BaseModel):
     location_name: str
     description: str
     map_link: HttpUrl | str | None = None
+    canonical_url: HttpUrl | str | None = None
+    search_url: HttpUrl | str | None = None
+    link_confidence: LinkConfidence = "unavailable"
+    provider: str | None = None
+    provider_place_id: str | None = None
     estimated_cost: float | None = None
     booking_link: HttpUrl | str | None = None
     status: ConfirmationStatus = ConfirmationStatus.PENDING
@@ -160,6 +166,30 @@ class ItineraryDraftModel(BaseModel):
     planning_notes: list[str] = Field(default_factory=list)
     pending_confirmations: list[str] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)
+
+
+class SerpApiQueryModel(BaseModel):
+    tool: Literal["search_google_maps", "search_local_places"] = "search_google_maps"
+    query: str = Field(..., min_length=1)
+    location: str = ""
+    reason: str = ""
+
+
+class SerpApiQueryPlanModel(BaseModel):
+    queries: list[SerpApiQueryModel] = Field(default_factory=list, min_length=1, max_length=4)
+    strategy_notes: list[str] = Field(default_factory=list)
+
+
+class SerpApiCandidateSelectionItemModel(BaseModel):
+    candidate_id: str = Field(..., min_length=1)
+    title: str = ""
+    reason: str = ""
+    confidence: float = 0.0
+
+
+class SerpApiCandidateSelectionModel(BaseModel):
+    selected_candidates: list[SerpApiCandidateSelectionItemModel] = Field(default_factory=list, min_length=1, max_length=8)
+    selection_notes: list[str] = Field(default_factory=list)
 
 
 class DraftGovernanceModel(BaseModel):
@@ -294,6 +324,11 @@ class HotelOptionModel(BaseModel):
     currency: str
     rating: float | None = None
     booking_link: HttpUrl | str | None = None
+    canonical_url: HttpUrl | str | None = None
+    search_url: HttpUrl | str | None = None
+    link_confidence: LinkConfidence = "unavailable"
+    provider: str | None = None
+    provider_place_id: str | None = None
     address: str | None = None
     notes: str | None = None
 
@@ -321,6 +356,10 @@ class FlightOptionModel(BaseModel):
     arrival_time: str
     duration_minutes: int | None = None
     booking_link: HttpUrl | str | None = None
+    canonical_url: HttpUrl | str | None = None
+    search_url: HttpUrl | str | None = None
+    link_confidence: LinkConfidence = "unavailable"
+    provider: str | None = None
     notes: str | None = None
 
 

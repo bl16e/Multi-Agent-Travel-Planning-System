@@ -3,7 +3,7 @@ import json
 import utils.agent_runtime as agent_runtime
 import provinces.zhongshu_itinerary.graph as zhongshu_graph
 from provinces.zhongshu_itinerary.graph import ZhongshuItineraryAgent
-from utils.schemas import ItineraryDraftModel
+from utils.schemas import ItineraryDraftModel, SerpApiCandidateSelectionModel, SerpApiQueryPlanModel
 
 
 @pytest.fixture(autouse=True)
@@ -95,6 +95,37 @@ async def test_draft_itinerary_uses_serpapi_discovery_then_amap_confirmation(mon
     seen = {}
 
     async def fake_synthesis(**kwargs):
+        output_model = kwargs.get("output_model")
+        if output_model is SerpApiQueryPlanModel:
+            seen["query_planning_variables"] = kwargs.get("variables")
+            return SerpApiQueryPlanModel.model_validate(
+                {
+                    "queries": [
+                        {
+                            "tool": "search_google_maps",
+                            "query": "Shanghai museums official cultural sites",
+                            "location": "",
+                            "reason": "Find named museum and culture POIs instead of keyword matching the broad interest.",
+                        }
+                    ],
+                    "strategy_notes": ["Prefer named POIs with official/provider identifiers."],
+                }
+            )
+        if output_model is SerpApiCandidateSelectionModel:
+            seen["candidate_selection_variables"] = kwargs.get("variables")
+            return SerpApiCandidateSelectionModel.model_validate(
+                {
+                    "selected_candidates": [
+                        {
+                            "candidate_id": "search_google_maps:0:0",
+                            "title": "\u4e0a\u6d77\u535a\u7269\u9986",
+                            "reason": "Directly matches the cultural museum intent.",
+                            "confidence": 0.92,
+                        }
+                    ],
+                    "selection_notes": ["Exclude broad or less relevant candidates before Amap confirmation."],
+                }
+            )
         seen["variables"] = kwargs.get("variables")
         return ItineraryDraftModel.model_validate(
             {
@@ -130,6 +161,10 @@ async def test_draft_itinerary_uses_serpapi_discovery_then_amap_confirmation(mon
         async def ainvoke(self, args):
             seen.setdefault("serpapi_args", []).append(args)
             return {
+                "search_metadata": {
+                    "raw_html_file": "https://serpapi.com/raw.html",
+                    "prettify_html_file": "https://serpapi.com/prettify.html",
+                },
                 "local_results": [
                     {
                         "title": "\u4e0a\u6d77\u535a\u7269\u9986",
@@ -196,17 +231,57 @@ async def test_draft_itinerary_uses_serpapi_discovery_then_amap_confirmation(mon
         "semantic_local_discovery",
         "domestic_poi_confirmation",
     }
-    assert seen["serpapi_args"][0]["query"] == "\u4e0a\u6d77 culture"
-    assert [item["keywords"] for item in seen["amap_args"]] == ["\u4e0a\u6d77\u535a\u7269\u9986", "\u4e2d\u534e\u827a\u672f\u5bab"]
+    assert seen["query_planning_variables"]["destination"] == "\u4e0a\u6d77"
+    assert seen["serpapi_args"][0]["query"] == "Shanghai museums official cultural sites"
+    assert [item["keywords"] for item in seen["amap_args"]] == ["\u4e0a\u6d77\u535a\u7269\u9986"]
     assert all(item["keywords"] != "\u4e0a\u6d77 culture" for item in seen["amap_args"])
     assert all(item["city"] == "\u4e0a\u6d77" for item in seen["amap_args"])
     research_payload = json.loads(seen["variables"]["research_context"])
-    assert research_payload[0]["phase"] == "discovery"
-    assert research_payload[0]["tool"] == "search_google_maps"
+    assert research_payload[0]["phase"] == "query_planning"
+    assert research_payload[0]["status"] == "ok"
+    assert any(item["phase"] == "candidate_selection" and item["status"] == "ok" for item in research_payload)
+    discovery = next(item for item in research_payload if item["phase"] == "discovery")
+    assert discovery["tool"] == "search_google_maps"
+    assert list(discovery["result"].keys()) == ["candidates"]
+    assert discovery["result"]["candidates"][0]["candidate_id"] == "search_google_maps:0:0"
+    assert "raw_html_file" not in seen["variables"]["research_context"]
     confirmation = next(item for item in research_payload if item["phase"] == "confirmation")
     assert confirmation["tool"] == "maps_text_search"
     assert confirmation["result"]["pois"][0]["name"] == "\u4e0a\u6d77\u535a\u7269\u9986"
     assert "Direct MCP tool calls removed" not in seen["variables"]["research_context"]
+
+
+@pytest.mark.asyncio
+async def test_candidate_selection_fallback_filters_low_relevance_places(monkeypatch):
+    async def fake_synthesis(**kwargs):
+        raise RuntimeError("candidate selection unavailable")
+
+    monkeypatch.setattr("provinces.zhongshu_itinerary.graph.run_structured_synthesis", fake_synthesis)
+
+    agent = ZhongshuItineraryAgent()
+    evidence = []
+    selected = await agent._select_serpapi_candidates(
+        {"destination": "\u4e0a\u6d77", "interests": ["\u6587\u5316"]},
+        {
+            "search_google_maps:0:0": {
+                "_candidate_id": "search_google_maps:0:0",
+                "title": "Shanghai Culture Square Garage",
+                "type": "Parking garage",
+                "address": "Shanghai",
+            },
+            "search_google_maps:0:1": {
+                "_candidate_id": "search_google_maps:0:1",
+                "title": "Shanghai Museum",
+                "type": "Museum",
+                "address": "201 Renmin Ave",
+                "place_id": "ChIJPWUSbWlwsjURbNvIw3tOTE0",
+            },
+        },
+        evidence,
+    )
+
+    assert [item["title"] for item in selected] == ["Shanghai Museum"]
+    assert evidence[-1]["phase"] == "candidate_selection_fallback"
 
 
 @pytest.mark.asyncio
