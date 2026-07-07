@@ -22,8 +22,8 @@ from utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS: float | None = None
-FLIGHT_ALLOWED_TOOLS = {"maps_geo"}
-FLIGHT_TOOL_SERVERS = ["amap"]
+FLIGHT_ALLOWED_TOOLS = {"maps_geo", "searchFlights", "searchAirports"}
+FLIGHT_TOOL_SERVERS = ["amap", "rollinggo"]
 
 
 class FlightTransportBureau:
@@ -66,34 +66,77 @@ class FlightTransportBureau:
         injected_reasoner = getattr(self, "_agent_reasoning", None)
         if injected_reasoner is not None and int(state.get("tool_step_count") or 0) == 0:
             return await injected_reasoner(state)
-        if "maps_geo" in self.available_tool_names and int(state.get("tool_step_count") or 0) == 0:
-            origin = worker_input.profile.get("origin_city") or worker_input.constraints.get("origin_city") or ""
-            return {
-                "worker_input": worker_input,
-                "messages": [
-                    AIMessage(
-                        content="Search Amap geocoding for origin and destination.",
-                        tool_calls=[
-                            {
-                                "name": "maps_geo",
-                                "args": {
-                                    "address": origin,
-                                    "city": origin,
-                                },
-                                "id": f"{worker_input.request_id}-geo-origin",
+        if int(state.get("tool_step_count") or 0) == 0:
+            tool_calls = []
+            if "maps_geo" in self.available_tool_names:
+                origin = worker_input.profile.get("origin_city") or worker_input.constraints.get("origin_city") or ""
+                tool_calls.extend(
+                    [
+                        {
+                            "name": "maps_geo",
+                            "args": {"address": origin, "city": origin},
+                            "id": f"{worker_input.request_id}-geo-origin",
+                        },
+                        {
+                            "name": "maps_geo",
+                            "args": {
+                                "address": worker_input.destination,
+                                "city": worker_input.destination,
                             },
-                            {
-                                "name": "maps_geo",
-                                "args": {
-                                    "address": worker_input.destination,
-                                    "city": worker_input.destination,
-                                },
-                                "id": f"{worker_input.request_id}-geo-destination",
-                            }
-                        ],
-                    )
-                ],
-            }
+                            "id": f"{worker_input.request_id}-geo-destination",
+                        },
+                    ]
+                )
+            if "searchAirports" in self.available_tool_names:
+                origin_city = worker_input.profile.get("origin_city") or worker_input.constraints.get("origin_city") or ""
+                tool_calls.append(
+                    {
+                        "name": "searchAirports",
+                        "args": {"keyword": origin_city},
+                        "id": f"{worker_input.request_id}-airport-origin",
+                    }
+                )
+                tool_calls.append(
+                    {
+                        "name": "searchAirports",
+                        "args": {"keyword": worker_input.destination},
+                        "id": f"{worker_input.request_id}-airport-dest",
+                    }
+                )
+            if "searchFlights" in self.available_tool_names:
+                origin_code = worker_input.constraints.get("origin_airport_code") or worker_input.profile.get("origin_city") or ""
+                dest_code = worker_input.constraints.get("destination_airport_code") or worker_input.destination
+                start_date = str(worker_input.constraints.get("start_date") or "")
+                end_date = str(worker_input.constraints.get("end_date") or "")
+                adults = int(worker_input.constraints.get("adults") or 1)
+                trip_type = "ROUND_TRIP" if end_date and end_date != start_date else "ONE_WAY"
+                flight_args = {
+                    "fromCity": origin_code,
+                    "toCity": dest_code,
+                    "fromDate": start_date,
+                    "adultNumber": adults,
+                    "cabinGrade": "ECONOMY",
+                    "tripType": trip_type,
+                }
+                if trip_type == "ROUND_TRIP":
+                    flight_args["retDate"] = end_date
+                tool_calls.append(
+                    {
+                        "name": "searchFlights",
+                        "args": flight_args,
+                        "id": f"{worker_input.request_id}-flight-search",
+                    }
+                )
+            if tool_calls:
+                return {
+                    "worker_input": worker_input,
+                    "messages": [
+                        AIMessage(
+                            content="Search transport options via Amap geocoding, airport lookup, and RollingGo flight search.",
+                            tool_calls=tool_calls,
+                        )
+                    ],
+                }
         if self.bound_tool_model is not None and int(state.get("tool_step_count") or 0) == 0:
             tool_message = await invoke_bound_tool_model(
                 self.bound_tool_model,
@@ -214,13 +257,131 @@ class FlightTransportBureau:
         fallback_note = "Estimated fallback; did not use real-time data. Confirm carrier, routing, fare, and timing before booking."
         research_note = state.get("research_notes") or "MCP or LLM unavailable."
         departure_date = profile.get("start_date") or self._first_trip_date(state.get("daily_plan", []))
+        # Estimate distance: domestic China routes typically 800–1500km
+        est_km = 800 if origin_city != destination else 0
+        direct_price = max(300.0, round(est_km * 0.8, 2)) if est_km > 0 else 300.0
+        connect_price = max(250.0, round(est_km * 0.6, 2)) if est_km > 0 else 250.0
+        direct_dur = max(60, int(est_km / 800 * 60)) if est_km > 0 else 120
+        connect_dur = max(90, int(est_km / 600 * 60)) if est_km > 0 else 180
         options = [
-            {"airline": "Estimated direct-flight option", "price": 320.0, "currency": profile.get("currency", "USD"), "departure_airport": departure_airport, "arrival_airport": arrival_airport, "departure_time": f"{departure_date} 08:30", "arrival_time": f"{departure_date} 12:15", "duration_minutes": 225, "booking_link": f"https://www.google.com/travel/flights?q={route_query}", "notes": f"{fallback_note} {research_note}"},
-            {"airline": "Estimated connection option", "price": 255.0, "currency": profile.get("currency", "USD"), "departure_airport": departure_airport, "arrival_airport": arrival_airport, "departure_time": f"{departure_date} 10:20", "arrival_time": f"{departure_date} 15:50", "duration_minutes": 330, "booking_link": f"https://www.skyscanner.com/transport/flights/{route_query}", "notes": f"{fallback_note} {research_note}"},
+            {"airline": "Estimated direct-flight option", "price": direct_price, "currency": profile.get("currency", "USD"), "departure_airport": departure_airport, "arrival_airport": arrival_airport, "departure_time": f"{departure_date} 08:30", "arrival_time": f"{departure_date} 12:15", "duration_minutes": direct_dur, "booking_link": f"https://www.google.com/travel/flights?q={route_query}", "notes": f"{fallback_note} {research_note}"},
+            {"airline": "Estimated connection option", "price": connect_price, "currency": profile.get("currency", "USD"), "departure_airport": departure_airport, "arrival_airport": arrival_airport, "departure_time": f"{departure_date} 10:20", "arrival_time": f"{departure_date} 15:50", "duration_minutes": connect_dur, "booking_link": f"https://www.skyscanner.com/transport/flights/{route_query}", "notes": f"{fallback_note} {research_note}"},
         ]
         return {"result": FlightTransportExecutionResult(origin=origin_city, destination=destination, flight_options=options, transport_notes=[fallback_note, research_note, failure_note], booking_links=[item["booking_link"] for item in options]).model_dump(mode="json")}
 
     def _transport_from_live_evidence(self, worker_input: LiubuWorkerInput, evidence: list[LiubuToolEvidence]) -> dict[str, Any] | None:
+        # --- First pass: try RollingGo searchFlights results (real booking data) ---
+        rgo_flights: list[dict[str, Any]] = []
+        for item in evidence:
+            if item.status != "ok" or item.tool_name != "searchFlights":
+                continue
+            result = item.result
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except json.JSONDecodeError:
+                    continue
+            if not isinstance(result, dict):
+                continue
+            # RollingGo returns "flightInformationList"
+            flight_list = (
+                result.get("flightInformationList")
+                or result.get("flights")
+                or result.get("data")
+                or result.get("routes")
+                or []
+            )
+            if isinstance(flight_list, list):
+                rgo_flights.extend(f for f in flight_list if isinstance(f, dict))
+            # Handle single-route response
+            if result.get("routingId") and not flight_list:
+                rgo_flights.append(result)
+
+        if rgo_flights:
+            currency = str(worker_input.constraints.get("currency") or worker_input.profile.get("currency") or "CNY")
+            origin_city = str(worker_input.profile.get("origin_city") or worker_input.constraints.get("origin_city") or "Origin")
+            destination = worker_input.destination
+            departure_airport = str(worker_input.profile.get("origin_airport_code") or worker_input.constraints.get("origin_airport_code") or "PEK")
+            arrival_airport = str(worker_input.profile.get("destination_airport_code") or worker_input.constraints.get("destination_airport_code") or "PVG")
+            options = []
+            links = []
+            for idx, f in enumerate(rgo_flights[:5], start=1):
+                # Extract segments (RollingGo nests flights under fromSegments)
+                segments = f.get("fromSegments") or f.get("segments") or []
+                if not segments and (f.get("flightNumber") or f.get("depAirport")):
+                    segments = [f]  # single-segment response
+                first_seg = segments[0] if segments else {}
+                last_seg = segments[-1] if segments else {}
+
+                airline = str(f.get("validatingCarrier") or f.get("airline") or f.get("carrier") or first_seg.get("flightNumber", f"Flight option {idx}"))
+
+                total_price = float(f.get("totalAdultPrice") or 0)
+                flight_currency = str(f.get("currency") or currency)
+                if total_price <= 0:
+                    price_info = f.get("price") or {}
+                    if isinstance(price_info, dict):
+                        total_price = float(price_info.get("amount") or price_info.get("total") or 0)
+                        flight_currency = str(price_info.get("currency") or currency)
+                if total_price <= 0:
+                    total_price = 500 + idx * 200
+
+                dep_airport = str(first_seg.get("depAirport") or f.get("departureAirport") or departure_airport)
+                arr_airport = str(last_seg.get("arrAirport") or f.get("arrivalAirport") or arrival_airport)
+                dep_time = str(first_seg.get("depTime") or f.get("departureTime") or "")
+                arr_time = str(last_seg.get("arrTime") or f.get("arrivalTime") or "")
+
+                # Calculate total duration across segments
+                duration_minutes = None
+                total_duration = 0
+                for seg in segments:
+                    try:
+                        total_duration += int(seg.get("duration") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                if total_duration > 0:
+                    duration_minutes = total_duration
+
+                stop_info = "直飞" if len(segments) <= 1 else f"{len(segments)-1} stops"
+                flight_numbers = " + ".join(
+                    str(s.get("flightNumber", "")) for s in segments if s.get("flightNumber")
+                )
+
+                booking_link = str(f.get("bookingUrl") or f.get("bookingLink") or f.get("booking_url") or f.get("url") or "")
+                if not booking_link:
+                    route_query = quote_plus(f"{origin_city} {destination} flights")
+                    booking_link = f"https://ditu.amap.com/search?query={route_query}"
+                links.append(booking_link)
+
+                notes_parts = [
+                    f"RollingGo live flight: {flight_numbers}",
+                    stop_info,
+                    f"carrier={airline}",
+                ]
+                options.append({
+                    "airline": f"{airline} {flight_numbers}",
+                    "price": total_price,
+                    "currency": flight_currency,
+                    "departure_airport": dep_airport,
+                    "arrival_airport": arr_airport,
+                    "departure_time": dep_time or f"{worker_input.constraints.get('start_date')} 08:30",
+                    "arrival_time": arr_time or f"{worker_input.constraints.get('start_date')} 12:00",
+                    "duration_minutes": duration_minutes,
+                    "booking_link": booking_link,
+                    "notes": "; ".join(notes_parts),
+                })
+            if options:
+                return FlightTransportExecutionResult(
+                    status="ok",
+                    data_source="live",
+                    origin=origin_city,
+                    destination=destination,
+                    flight_options=options,
+                    transport_notes=[f"RollingGo live flight search used for {origin_city} to {destination}."],
+                    booking_links=links,
+                    liubu_evidence=[item.model_dump(mode="json") for item in evidence],
+                ).model_dump(mode="json")
+
+        # --- Second pass: Amap geo-based distance estimation ---
         distance_meters: float | None = None
         duration_seconds: float | None = None
         geo_points: list[str] = []
@@ -272,7 +433,8 @@ class FlightTransportBureau:
         departure_date = str(worker_input.constraints.get("start_date") or profile.get("start_date") or self._first_trip_date(worker_input.daily_plan))
         distance_km = distance_meters / 1000
         duration_minutes = int((duration_seconds or 0) / 60) if duration_seconds else None
-        base_price = max(120.0, round(distance_km * 0.35, 2))
+        # Dynamic pricing: domestic ~0.8 CNY/km, min 200 CNY
+        base_price = max(200.0, round(distance_km * 0.8, 2))
         route_query = quote_plus(f"{origin_city} {destination} transport")
         options = [
             {

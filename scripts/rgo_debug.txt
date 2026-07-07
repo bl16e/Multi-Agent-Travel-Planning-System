@@ -1,0 +1,212 @@
+
+============================================================
+CALL: searchHotels on h
+ARGS: {
+  "place": "杭州",
+  "placeType": "CITY",
+  "countryCode": "CN",
+  "size": 3,
+  "originQuery": "杭州 hotel 2026-07-14 to 2026-07-16",
+  "checkInParam": {
+    "checkInDate": "2026-07-14",
+    "checkOutDate": "2026-07-16",
+    "occupancy": [
+      {
+        "adults": 2
+      }
+    ]
+  }
+}
+RESULT TYPE: str
+RESULT (str, first 2000 chars): {"success":true,"message":"酒店搜索成功","hotelInformationList":[{"hotelId":500458,"bookingUrl":"https://rollinggo.cn/pages/hotel/detail/index?id=500458&checkInDate=2026-07-14&checkOutDate=2026-07-15&roomCount=1&adultCount=1&childCount=0&childAgeDetails=&utm_source=0A0CKE","name":"杭州丁桥开元颐居酒店(丁兰广场店)","nameEn":"Hangzhou Dingqiao Kaiyuan Yiju Hotel","brand":"德胧","address":"丁桥明珠街271-273号","destinationId":"6084457","latitude":30.352191,"longitude":120.232272,"distanceInMeters":null,"starRating":3.0,"price":{"message":"查价成功。最低价格：206，币种：CNY","hasPrice":true,"currency":"CNY","lowestPrice":206.0},"areaCode":"CN","description":"<p><b>酒店简介描述</b><br/>酒店坐落在杭州市北部区域繁华商贸中心--杭州市上城区丁桥明珠街，毗邻丁兰广场、半山国家森林公园、虎山公园、皋山公园、周边汇集知名餐饮、大型棋牌娱乐会所、健身会所等等。<br>酒店集客房，会务，棋牌等设施于一体，拥有各种类型的客房一百余间，各款房间内舒适温馨，设备一应俱全。国际国内直拨电话、宽带互联网、wifi为高品味客人量身定作，先进完善的服务设施和“宾至如归”的优质服务，让你感受到诚挚与温馨的快捷和便利，仿佛回到现代化的家。“以客为尊，宾客至上”，让每一位客人都成为酒店的朋友。</p>","imageUrl":"https://image2-cdn.aigohotel.com/3/Image/500458/200w0800000034wccA3C8_R_550_412.jpg-agh","hotelAmenities":["叫醒服务","行李寄存","快速入住退房","24小时前台","公共音响系统","棋牌室","健身室","KTV","电梯","前台贵重物品保险柜","会议厅设施收费:2000CNY/天.","商场","公共区域监控","无障碍客房","无烟楼层","无障碍通道","快递服务","叫车服务","前台服务语言","旅游票务服务","外送洗衣服务","商务服务","多媒体演示系统","空调","传真/复印设施需要收费.","吸烟区","公共区域禁烟","餐厅开放时间(24小时制): 07:00~09:00开放时间(星期): 周一到周日","儿童拖鞋","儿童牙刷","VIP通道入住","公用区wifi","干衣机","急救包","净水机","火灾报警器","门禁系统","新风系统","灭火器","洗涤用具","熨斗/挂烫机","自动售货机","储物柜","洗衣房","机器人服务","烟雾报警器","安全报警器","安保人员","一氧化碳报警器","电子身份证入住","楼梯扶手","售货亭/便利店","停车场","充电车位","WIFI"],"tags":["当地连锁","备有拖鞋","备有热水壶","客房备有吹风机","提供大床房","提供双床房"]},{"hotelId":2152020,"bookingUrl":"https://rollinggo.cn/pages/hotel/detail/index?id=2152020&checkInDate=2026-07-14&checkOutDate=2026-07-15&roomCount=1&adultCount=1&childCount=0&childAgeDetails=&utm_source=0A0CKE","name":"杭州萧山国际机场柏纳酒店","nameEn":"Hangzhou Xiaoshan International Airport Urba Hotel","brand":null,"address":"翔飞路92号3幢","destinationId":"6084457","latitude":30.223805,"longitude":120.415816,"distanceInMeters":null,"starRating":3.0,"price":{"message"
+PARSED KEYS: ['success', 'message', 'hotelInformationList']
+PARSED (first 2000 chars): {
+  "success": true,
+  "message": "酒店搜索成功",
+  "hotelInformationList": [
+    {
+      "hotelId": 500458,
+      "bookingUrl": "https://rollinggo.cn/pages/hotel/detail/index?id=500458&checkInDate=2026-07-14&checkOutDate=2026-07-15&roomCount=1&adultCount=1&childCount=0&childAgeDetails=&utm_source=0A0CKE",
+      "name": "杭州丁桥开元颐居酒店(丁兰广场店)",
+      "nameEn": "Hangzhou Dingqiao Kaiyuan Yiju Hotel",
+      "brand": "德胧",
+      "address": "丁桥明珠街271-273号",
+      "destinationId": "6084457",
+      "latitude": 30.352191,
+      "longitude": 120.232272,
+      "distanceInMeters": null,
+      "starRating": 3.0,
+      "price": {
+        "message": "查价成功。最低价格：206，币种：CNY",
+        "hasPrice": true,
+        "currency": "CNY",
+        "lowestPrice": 206.0
+      },
+      "areaCode": "CN",
+      "description": "<p><b>酒店简介描述</b><br/>酒店坐落在杭州市北部区域繁华商贸中心--杭州市上城区丁桥明珠街，毗邻丁兰广场、半山国家森林公园、虎山公园、皋山公园、周边汇集知名餐饮、大型棋牌娱乐会所、健身会所等等。<br>酒店集客房，会务，棋牌等设施于一体，拥有各种类型的客房一百余间，各款房间内舒适温馨，设备一应俱全。国际国内直拨电话、宽带互联网、wifi为高品味客人量身定作，先进完善的服务设施和“宾至如归”的优质服务，让你感受到诚挚与温馨的快捷和便利，仿佛回到现代化的家。“以客为尊，宾客至上”，让每一位客人都成为酒店的朋友。</p>",
+      "imageUrl": "https://image2-cdn.aigohotel.com/3/Image/500458/200w0800000034wccA3C8_R_550_412.jpg-agh",
+      "hotelAmenities": [
+        "叫醒服务",
+        "行李寄存",
+        "快速入住退房",
+        "24小时前台",
+        "公共音响系统",
+        "棋牌室",
+        "健身室",
+        "KTV",
+        "电梯",
+        "前台贵重物品保险柜",
+        "会议厅设施收费:2000CNY/天.",
+        "商场",
+        "公共区域监控",
+        "无障碍客房",
+        "无烟楼层",
+        "无障碍通道",
+        "快递服务",
+        "叫车服务",
+        "前台服务语言",
+        "旅游票务服务",
+        "外送洗衣服务",
+        "商务服务",
+        "多媒体演示系统",
+        "空调",
+        "传真/复印设施需要收费.",
+        "吸烟区",
+        "公共区域禁烟",
+        "餐厅开放时间(24小时制): 07:00~09:00开放时间(星期): 周一到周日",
+        "儿童拖鞋",
+        "儿童牙刷",
+        "VIP通道入住",
+        "公用区wifi",
+        "干衣机",
+        "急救包",
+        "净水机",
+        "火灾报警器",
+        "门禁系统",
+        "新风系统",
+        "灭火器",
+        "洗涤用具",
+        "熨斗/挂烫机",
+        "自动售货机",
+        "储物柜",
+        "洗衣房",
+        "机器人服务",
+
+============================================================
+CALL: searchFlights on f
+ARGS: {
+  "fromCity": "BJS",
+  "toCity": "SHA",
+  "fromDate": "2026-07-14",
+  "adultNumber": 2,
+  "cabinGrade": "ECONOMY",
+  "tripType": "ONE_WAY"
+}
+RESULT TYPE: str
+RESULT (str, first 2000 chars): {"success":true,"message":"航班搜索成功","flightInformationList":[{"routingId":"AAAAAQAPc2VhcmNoX3JvdXRpbmdzACA1MGE0MWU0MWQ3ZjA0ZjM3YjJhZGE5OTI0YjE2ODg2NwAgZDRiY2IzNzE1YzU0NDE0M2I4YmYwOTUzMWRhZmU5Nzk=","totalAdultPrice":1639.0,"totalChildPrice":0.0,"currency":"CNY","fromSmartValueScore":94.56086649399576,"retSmartValueScore":null,"validatingCarrier":"CA","bookingUrl":null,"fromSegments":[{"flightNumber":"CA1523","depTime":"2026-07-14T11:00:00","arrTime":"2026-07-14T13:15:00","depAirport":"PEK","arrAirport":"SHA","duration":135,"stopCities":""}],"retSegments":[]},{"routingId":"AAAAAQAPc2VhcmNoX3JvdXRpbmdzACA1MGE0MWU0MWQ3ZjA0ZjM3YjJhZGE5OTI0YjE2ODg2NwAgNGUwMDJkZDdhYjg3NDI1ODg0ZDc5ZjJlNGY0NmQyY2Y=","totalAdultPrice":1913.0,"totalChildPrice":0.0,"currency":"CNY","fromSmartValueScore":78.05126156467354,"retSmartValueScore":null,"validatingCarrier":"NX","bookingUrl":null,"fromSegments":[{"flightNumber":"NX005","depTime":"2026-07-14T12:20:00","arrTime":"2026-07-14T16:05:00","depAirport":"PEK","arrAirport":"MFM","duration":225,"stopCities":""},{"flightNumber":"NX106","depTime":"2026-07-14T18:50:00","arrTime":"2026-07-14T21:15:00","depAirport":"MFM","arrAirport":"SHA","duration":145,"stopCities":""}],"retSegments":[]},{"routingId":"AAAAAQAPc2VhcmNoX3JvdXRpbmdzACA1MGE0MWU0MWQ3ZjA0ZjM3YjJhZGE5OTI0YjE2ODg2NwAgZDFmM2ZmZDZiODE2NDFiYzk4MmFmYzQ1NjhiYTEzMjg=","totalAdultPrice":2120.0,"totalChildPrice":0.0,"currency":"CNY","fromSmartValueScore":77.03264432527389,"retSmartValueScore":null,"validatingCarrier":"CA","bookingUrl":null,"fromSegments":[{"flightNumber":"CA5453","depTime":"2026-07-14T12:20:00","arrTime":"2026-07-14T16:05:00","depAirport":"PEK","arrAirport":"MFM","duration":225,"stopCities":""},{"flightNumber":"CA5446","depTime":"2026-07-14T18:50:00","arrTime":"2026-07-14T21:15:00","depAirport":"MFM","arrAirport":"SHA","duration":145,"stopCities":""}],"retSegments":[]},{"routingId":"AAAAAQAPc2VhcmNoX3JvdXRpbmdzACA1MGE0MWU0MWQ3ZjA0ZjM3YjJhZGE5OTI0YjE2ODg2NwAgMTI5OTZjNDU0NDA1NGM5Mjk3Z
+PARSED KEYS: ['success', 'message', 'flightInformationList']
+PARSED (first 2000 chars): {
+  "success": true,
+  "message": "航班搜索成功",
+  "flightInformationList": [
+    {
+      "routingId": "AAAAAQAPc2VhcmNoX3JvdXRpbmdzACA1MGE0MWU0MWQ3ZjA0ZjM3YjJhZGE5OTI0YjE2ODg2NwAgZDRiY2IzNzE1YzU0NDE0M2I4YmYwOTUzMWRhZmU5Nzk=",
+      "totalAdultPrice": 1639.0,
+      "totalChildPrice": 0.0,
+      "currency": "CNY",
+      "fromSmartValueScore": 94.56086649399576,
+      "retSmartValueScore": null,
+      "validatingCarrier": "CA",
+      "bookingUrl": null,
+      "fromSegments": [
+        {
+          "flightNumber": "CA1523",
+          "depTime": "2026-07-14T11:00:00",
+          "arrTime": "2026-07-14T13:15:00",
+          "depAirport": "PEK",
+          "arrAirport": "SHA",
+          "duration": 135,
+          "stopCities": ""
+        }
+      ],
+      "retSegments": []
+    },
+    {
+      "routingId": "AAAAAQAPc2VhcmNoX3JvdXRpbmdzACA1MGE0MWU0MWQ3ZjA0ZjM3YjJhZGE5OTI0YjE2ODg2NwAgNGUwMDJkZDdhYjg3NDI1ODg0ZDc5ZjJlNGY0NmQyY2Y=",
+      "totalAdultPrice": 1913.0,
+      "totalChildPrice": 0.0,
+      "currency": "CNY",
+      "fromSmartValueScore": 78.05126156467354,
+      "retSmartValueScore": null,
+      "validatingCarrier": "NX",
+      "bookingUrl": null,
+      "fromSegments": [
+        {
+          "flightNumber": "NX005",
+          "depTime": "2026-07-14T12:20:00",
+          "arrTime": "2026-07-14T16:05:00",
+          "depAirport": "PEK",
+          "arrAirport": "MFM",
+          "duration": 225,
+          "stopCities": ""
+        },
+        {
+          "flightNumber": "NX106",
+          "depTime": "2026-07-14T18:50:00",
+          "arrTime": "2026-07-14T21:15:00",
+          "depAirport": "MFM",
+          "arrAirport": "SHA",
+          "duration": 145,
+          "stopCities": ""
+        }
+      ],
+      "retSegments": []
+    },
+    {
+      "routingId": "AAAAAQAPc2VhcmNoX3JvdXRpbmdzACA1MGE0MWU0MWQ3ZjA0ZjM3YjJhZGE5OTI0YjE2ODg2NwAgZDFmM2ZmZDZiODE2NDFiYzk4MmFmYzQ1NjhiYTEzMjg=",
+      "totalAdultPrice": 2120.0,
+      "totalChildPrice": 0.0,
+      "currency": "CNY",
+      "fromSmartValueScore"
+
+============================================================
+CALL: searchAirports on f
+ARGS: {
+  "keyword": "北京"
+}
+RESULT TYPE: str
+RESULT (str, first 2000 chars): {"success":true,"message":"机场搜索成功","airPortInformationList":[{"airportCode":"PEK","airportName":"首都国际机场","cityCode":"BJS","cityName":"北京","countryCode":"CN","countryName":"中国","timeZone":"+08:00"},{"airportCode":"PKX","airportName":"大兴国际机场","cityCode":"BJS","cityName":"北京","countryCode":"CN","countryName":"中国","timeZone":"+08:00"},{"airportCode":"EKG","airportName":"Beijing Bawangfen Bus Station","cityCode":"BJS","cityName":"北京","countryCode":"CN","countryName":"中国","timeZone":"+08:00"}]}
+PARSED KEYS: ['success', 'message', 'airPortInformationList']
+PARSED (first 2000 chars): {
+  "success": true,
+  "message": "机场搜索成功",
+  "airPortInformationList": [
+    {
+      "airportCode": "PEK",
+      "airportName": "首都国际机场",
+      "cityCode": "BJS",
+      "cityName": "北京",
+      "countryCode": "CN",
+      "countryName": "中国",
+      "timeZone": "+08:00"
+    },
+    {
+      "airportCode": "PKX",
+      "airportName": "大兴国际机场",
+      "cityCode": "BJS",
+      "cityName": "北京",
+      "countryCode": "CN",
+      "countryName": "中国",
+      "timeZone": "+08:00"
+    },
+    {
+      "airportCode": "EKG",
+      "airportName": "Beijing Bawangfen Bus Station",
+      "cityCode": "BJS",
+      "cityName": "北京",
+      "countryCode": "CN",
+      "countryName": "中国",
+      "timeZone": "+08:00"
+    }
+  ]
+}

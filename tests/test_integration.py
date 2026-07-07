@@ -269,4 +269,4 @@ def test_markdown_labels_search_fallback_links_transparently(tmp_path):
     assert "[Search](https://ditu.amap.com/search?query=%E4%B8%8A%E6%B5%B7%E5%8D%9A%E7%89%A9%E9%A6%86)" in markdown
     assert "[Map](https://ditu.amap.com/search?query=%E4%B8%8A%E6%B5%B7%E5%8D%9A%E7%89%A9%E9%A6%86)" not in markdown
     assert "[Map](https://www.google.com/maps/place/Shanghai+Museum)" in markdown
-    assert "[Official](https://www.shanghaimuseum.net/)" in markdown
+    assert "[Website](https://www.shanghaimuseum.net/)" in markdown

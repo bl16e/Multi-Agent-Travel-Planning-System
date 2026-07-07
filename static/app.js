@@ -46,7 +46,7 @@
     return d.innerHTML;
   }
   function splitTags(s) {
-    return s.split(/[,锛宂/).map((t) => t.trim()).filter(Boolean);
+    return s.split(/[,，]/).map((t) => t.trim()).filter(Boolean);
   }
   function show(el) {
     el.style.display = "block";

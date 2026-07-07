@@ -15,7 +15,7 @@ from langgraph.graph.message import add_messages
 from provinces.liubu.constrained.state import LiubuWorkerInput
 from provinces.liubu.official_tooling import EvidenceToolNode, bind_tools_if_available, invoke_bound_tool_model, load_allowed_liubu_tools, run_tool_node_collect_evidence
 from utils.agent_runtime import escape_prompt_template_text, soul_path_for
-from utils.schemas import WeatherExecutionResult
+from utils.schemas import SimpleWeatherOutput, WeatherExecutionResult
 from utils.llm_factory import build_qwen_chat
 from utils.settings import get_settings
 
@@ -154,16 +154,17 @@ class WeatherBureau:
         llm = build_qwen_chat()
         if llm:
             try:
-                structured = llm.with_structured_output(WeatherExecutionResult)
+                structured = llm.with_structured_output(SimpleWeatherOutput)
                 prompt = ChatPromptTemplate.from_messages([
                     ("system", escape_prompt_template_text(Path(self.soul_path).read_text(encoding="utf-8"))),
-                    ("user", "Destination: {destination}\nDaily plan: {daily_plan}\nResearch notes: {research_notes}\nReturn valid JSON structured weather guidance."),
+                    ("user", "Destination: {destination}\nDaily plan: {daily_plan}\nResearch notes: {research_notes}\nReturn valid JSON with exactly these keys: dest, days, pack, warn, note."),
                 ])
-                result = await asyncio.wait_for(
+                simple_result = await asyncio.wait_for(
                     (prompt | structured).ainvoke({"destination": state["destination"], "daily_plan": str(state.get("daily_plan", [])), "research_notes": state.get("research_notes", "")}),
                     timeout=STRUCTURED_SYNTHESIS_TIMEOUT_SECONDS or get_settings().qwen_timeout_seconds,
                 )
-                data = result.model_dump(mode="json")
+                full_result = simple_result.to_weather_result(destination=state["destination"])
+                data = full_result.model_dump(mode="json")
                 data.update({"status": "ok", "data_source": "structured_llm"})
                 return {"result": data}
             except asyncio.TimeoutError:
@@ -203,6 +204,18 @@ class WeatherBureau:
             if item.get("status") != "ok" or item.get("tool_name") != "maps_weather":
                 continue
             result = item.get("result")
+            # MCP tools sometimes wrap text results in a list of TextContent dicts
+            if isinstance(result, list):
+                for entry in result:
+                    if isinstance(entry, dict) and entry.get("type") == "text":
+                        try:
+                            result = json.loads(str(entry.get("text", "")))
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(result, dict):
+                            break
+                else:
+                    continue
             if isinstance(result, str):
                 try:
                     result = json.loads(result)
@@ -210,37 +223,30 @@ class WeatherBureau:
                     continue
             if not isinstance(result, dict):
                 continue
-            forecasts = result.get("forecasts")
-            if not isinstance(forecasts, list):
+            # --- flexible extraction of day-level casts ---
+            casts = self._extract_casts(result)
+            if not casts:
                 continue
-            casts: list[dict[str, Any]] = []
-            for forecast in forecasts:
-                if not isinstance(forecast, dict):
-                    continue
-                if isinstance(forecast.get("casts"), list):
-                    casts.extend(cast for cast in forecast["casts"] if isinstance(cast, dict))
-                elif forecast.get("date"):
-                    casts.append(forecast)
+            # --- match casts to trip dates ---
             days: list[dict[str, Any]] = []
             for forecast_date in forecast_dates:
-                cast = next((candidate for candidate in casts if str(candidate.get("date")) == forecast_date.isoformat()), None)
-                if cast is None and casts:
-                    cast = casts[min(len(days), len(casts) - 1)]
+                cast = self._best_cast_for_date(casts, forecast_date, days)
                 if cast is None:
                     continue
                 min_temp = self._float_or_default(cast.get("nighttemp"), 18.0)
                 max_temp = self._float_or_default(cast.get("daytemp"), min_temp)
+                is_fallback = bool(cast.get("_estimated_fallback"))
                 days.append(
                     {
                         "date": forecast_date,
-                        "condition": str(cast.get("dayweather") or cast.get("nightweather") or "Weather available"),
+                        "condition": str(cast.get("dayweather") or cast.get("nightweather") or cast.get("weather") or "Weather available"),
                         "min_temp_c": min_temp,
                         "max_temp_c": max_temp,
                         "precipitation_probability": 0.0,
                         "activity_suitability": "Use the live Amap forecast to schedule outdoor blocks flexibly.",
                         "clothing_advice": ["Pack layers suitable for the live forecast."],
-                        "warnings": [],
-                        "is_estimated": False,
+                        "warnings": ["Only one live forecast entry available; reused for this date."] if is_fallback else [],
+                        "is_estimated": is_fallback,
                     }
                 )
             if days:
@@ -253,6 +259,69 @@ class WeatherBureau:
                     warnings=[],
                     summary="Live Amap weather forecast was used for the trip dates.",
                 ).model_dump(mode="json")
+        return None
+
+    # ------------------------------------------------------------------
+    # helpers for parsing heterogenous Amap weather responses
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_casts(result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Pull day-level weather entries from several known Amap shapes."""
+        casts: list[dict[str, Any]] = []
+        # Shape A: {"forecasts": [{"casts": [...]}, ...]}
+        forecasts = result.get("forecasts")
+        if isinstance(forecasts, list):
+            for f in forecasts:
+                if isinstance(f, dict):
+                    sub = f.get("casts")
+                    if isinstance(sub, list):
+                        casts.extend(c for c in sub if isinstance(c, dict))
+                    elif f.get("date"):
+                        casts.append(f)
+        # Shape B: {"lives": [{"weather": "...", "temperature": "...", ...}, ...]}
+        lives = result.get("lives")
+        if isinstance(lives, list):
+            for live in lives:
+                if isinstance(live, dict):
+                    # Normalize to look like a cast entry
+                    normalized: dict[str, Any] = dict(live)
+                    if "date" not in normalized:
+                        normalized["date"] = date.today().isoformat()
+                    casts.append(normalized)
+        # Shape C: result *is* a flat dict with weather keys directly
+        if not casts and isinstance(result.get("weather"), str):
+            casts.append(result)
+        # Shape D: result contains a flat "data" array of day entries
+        data_list = result.get("data") or result.get("list")
+        if isinstance(data_list, list):
+            for entry in data_list:
+                if isinstance(entry, dict):
+                    casts.append(entry)
+        return casts
+
+    @staticmethod
+    def _best_cast_for_date(casts: list[dict[str, Any]], target_date: date, days_so_far: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """Find the best matching cast entry for *target_date*."""
+        target_str = target_date.isoformat()
+        # exact date match
+        for c in casts:
+            if str(c.get("date")) == target_str:
+                return c
+        # fuzzy: date string contains the iso fragment
+        for c in casts:
+            date_val = str(c.get("date", ""))
+            if target_str in date_val or date_val.startswith(target_str[:7]):
+                return c
+        # fallback: pick the next unused cast by index
+        idx = len(days_so_far)
+        if idx < len(casts):
+            return casts[idx]
+        # absolute fallback: reuse last cast but mark as estimated
+        if casts:
+            last = dict(casts[-1])
+            last["_estimated_fallback"] = True
+            return last
         return None
 
     def _float_or_default(self, value: Any, default: float) -> float:

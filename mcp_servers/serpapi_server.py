@@ -156,6 +156,28 @@ async def search_local_places(query: str, location: str = "") -> dict:
     return await _search(params)
 
 
+@mcp.tool()
+async def search_google_web(query: str, num: int = 10) -> dict:
+    """Search Google web results — use this to discover recommended attractions,
+    top sights, and travel guides for a destination BEFORE pinpointing them on
+    a map.
+
+    For example, search \"上海必去景点\" or \"best temples in Kyoto\" to find
+    curated lists of real places, then use search_google_maps or maps_text_search
+    to get exact addresses and links for each place.
+    """
+    return await _search(
+        {
+            "engine": "google",
+            "q": query,
+            "num": str(min(max(num, 1), 20)),
+            "api_key": settings.serpapi_api_key,
+            "hl": "zh-CN",
+            "gl": "cn",
+        }
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--transport", choices=["stdio", "http", "sse", "streamable-http", "streamable_http"], default="stdio")

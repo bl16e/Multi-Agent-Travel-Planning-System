@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -120,7 +120,7 @@ class ZhongshuItineraryAgent:
                 soul_path=self.soul_path,
                 output_model=ItineraryDraftModel,
                 user_prompt=(
-                    "请根据用户需求生成详细的旅行行程草案（使用中文）。\n"
+                    "请根据用户需求生成详细的旅行行程草案（全程中文输出）。\n"
                     "目的地: {destination}\n"
                     "日期: {start_date} 至 {end_date}\n"
                     "出发地: {origin_city} ({origin_airport_code})\n"
@@ -131,6 +131,13 @@ class ZhongshuItineraryAgent:
                     "之前的拒绝原因: {rejection_reasons}\n"
                     "修订要求: {revision_requests}\n"
                     "研究背景: {research_context}\n\n"
+                    "关键规则:\n"
+                    "1. 全程中文：所有地点名、活动标题、描述、摘要必须为中文。研究背景中的英文名必须翻译为规范中文名。\n"
+                    "2. 每天必须有一个明确主题（来自用户兴趣列表），当天所有活动必须与该主题严格匹配。\n"
+                    "   例如「food/美食」主题日只能安排餐厅、小吃街、夜市、烹饪课等饮食相关活动，禁止安排博物馆或展览馆。\n"
+                    "3. 只选择地址确实在 {destination} 市内的真实地点。地址在国外的同名商户绝对不能选。\n"
+                    "4. 每个活动必须有研究背景中确认过的真实地点名称、地址和链接，不要编造。\n"
+                    "5. 每天安排2-3个活动，留出用餐和交通时间。\n"
                     "生成具体景点名称、真实预订链接、交通细节和天气应急方案。"
                 ),
                 variables={
@@ -161,6 +168,7 @@ class ZhongshuItineraryAgent:
 
         timeout_seconds = get_settings().mcp_tooling_timeout_seconds
         categories = {
+            "web_search_discovery",
             "global_place_discovery",
             "semantic_local_discovery",
             "domestic_poi_confirmation",
@@ -180,7 +188,7 @@ class ZhongshuItineraryAgent:
         discovery_tools = [
             tool
             for tool in tools
-            if getattr(tool, "name", None) in {"search_google_maps", "search_local_places"}
+            if getattr(tool, "name", None) in {"search_google_web", "search_google_maps", "search_local_places"}
         ]
         text_search = next((tool for tool in tools if getattr(tool, "name", None) == "maps_text_search"), None)
         if not discovery_tools:
@@ -226,7 +234,13 @@ class ZhongshuItineraryAgent:
                     enriched = {**candidate, "_candidate_id": candidate_id}
                     candidates_by_id[candidate_id] = enriched
                     result_candidates[candidate_id] = enriched
-                evidence.append({"phase": "discovery", "tool": tool_name, "status": "ok", "args": args, "result": {"candidates": _candidate_summaries(result_candidates)}})
+                discovery_result: dict[str, Any] = {"candidates": _candidate_summaries(result_candidates)}
+                # Preserve raw organic_results for web search extraction step
+                if tool_name == "search_google_web" and isinstance(decoded, dict):
+                    org = decoded.get("organic_results")
+                    if isinstance(org, list):
+                        discovery_result["organic_results"] = org
+                evidence.append({"phase": "discovery", "tool": tool_name, "status": "ok", "args": args, "result": discovery_result})
             except asyncio.TimeoutError:
                 logger.warning(
                     "Zhongshu live research discovery timed out request_id=%s destination=%s query=%s timeout_seconds=%s",
@@ -247,7 +261,45 @@ class ZhongshuItineraryAgent:
                 )
                 evidence.append({"phase": "discovery", "tool": tool_name, "status": "error", "args": args, "error": str(exc)})
 
+        # --- Post-discovery: extract concrete place names from web search results ---
+        web_organic_results: list[dict[str, Any]] = []
+        for item in evidence:
+            if item.get("phase") != "discovery" or item.get("tool") != "search_google_web":
+                continue
+            decoded = item.get("result", {})
+            if isinstance(decoded, dict):
+                # Organic results may be at top level (from discovery) or nested in candidates
+                org = decoded.get("organic_results") or []
+                if not org:
+                    candidates_val = decoded.get("candidates")
+                    if isinstance(candidates_val, dict):
+                        org = candidates_val.get("organic_results") or []
+                if isinstance(org, list):
+                    web_organic_results.extend(r for r in org if isinstance(r, dict))
+
+        if web_organic_results and candidates_by_id:
+            extracted_names = await self._extract_place_names_from_web(
+                destination, web_organic_results, normalized
+            )
+            if extracted_names:
+                # Build synthetic candidates from extracted place names.
+                # These bypass _select_serpapi_candidates (which expects
+                # map/local-result fields like address/place_id) and go
+                # directly to Amap confirmation.
+                extracted_candidates: dict[str, dict[str, Any]] = {}
+                for idx, name in enumerate(extracted_names):
+                    cid = f"extracted_place:{idx}"
+                    extracted_candidates[cid] = {"_candidate_id": cid, "title": name, "name": name, "_extracted": True}
+                # Replace web article candidates with extracted real place names
+                maps_candidates = {k: v for k, v in candidates_by_id.items() if "search_google_web" not in k}
+                candidates_by_id = {**maps_candidates, **extracted_candidates}
+                evidence.append({"phase": "extraction", "tool": "search_google_web", "status": "ok", "result": {"extracted_place_names": extracted_names}})
+
         confirmed_places = await self._select_serpapi_candidates(normalized, candidates_by_id, evidence)
+        # --- Also confirm extracted place names directly via Amap ---
+        extracted = [c for c in candidates_by_id.values() if c.get("_extracted")]
+        if extracted:
+            confirmed_places = list(confirmed_places) + extracted
         for source_place in confirmed_places:
             place_name = str(source_place.get("title") or source_place.get("name") or "").strip()
             if not place_name:
@@ -261,7 +313,18 @@ class ZhongshuItineraryAgent:
                     place_name,
                 )
                 result = await asyncio.wait_for(text_search.ainvoke(args), timeout=timeout_seconds)
-                evidence.append({"phase": "confirmation", "tool": "maps_text_search", "status": "ok", "args": args, "source_place": source_place, "result": _decode_tool_result(result)})
+                decoded = _decode_tool_result(result)
+                # --- Geo-filter: reject POIs whose Amap results don't match the destination city ---
+                if not _amap_result_matches_city(decoded, destination):
+                    logger.info(
+                        "Zhongshu Amap confirmation rejected non-local POI request_id=%s place=%s destination=%s",
+                        request_id,
+                        place_name,
+                        destination,
+                    )
+                    evidence.append({"phase": "confirmation", "tool": "maps_text_search", "status": "rejected", "args": args, "reason": f"Amap result address does not match destination city '{destination}'"})
+                    continue
+                evidence.append({"phase": "confirmation", "tool": "maps_text_search", "status": "ok", "args": args, "source_place": source_place, "result": decoded})
             except asyncio.TimeoutError:
                 logger.warning(
                     "Zhongshu live research Amap confirmation timed out request_id=%s destination=%s place=%s timeout_seconds=%s",
@@ -285,6 +348,74 @@ class ZhongshuItineraryAgent:
         if not any(item.get("phase") == "confirmation" and item.get("status") == "ok" for item in evidence):
             return "Live research unavailable: no successful SerpAPI-to-Amap confirmed place result."
         return json.dumps(evidence, ensure_ascii=False)
+
+    async def _extract_place_names_from_web(
+        self,
+        destination: str,
+        organic_results: list[dict[str, Any]],
+        normalized: dict[str, Any],
+    ) -> list[str]:
+        """Use LLM to extract concrete attraction/restaurant names from web search results.
+
+        Web search returns articles and blog posts *about* attractions (e.g.
+        "上海10大必去景点"), not the attractions themselves.  The LLM reads
+        the titles and snippets and returns ONLY the actual place names.
+        """
+        if not organic_results:
+            return []
+
+        # Collect titles and snippets (max 15 results to stay within context)
+        snippets_text = ""
+        for i, r in enumerate(organic_results[:15]):
+            title = str(r.get("title") or "").strip()
+            snippet = str(r.get("snippet") or r.get("about") or "").strip()
+            if title:
+                snippets_text += f"{i+1}. {title}"
+                if snippet:
+                    snippets_text += f" — {snippet[:200]}"
+                snippets_text += "\n"
+
+        if not snippets_text.strip():
+            return []
+
+        try:
+            from utils.llm_factory import build_qwen_chat
+            from langchain_core.messages import HumanMessage, SystemMessage
+            from pydantic import BaseModel, Field
+
+            llm = build_qwen_chat()
+            if llm is None:
+                logger.warning("Place name extraction skipped: LLM unavailable")
+                return []
+
+            class PlaceNameList(BaseModel):
+                places: list[str] = Field(
+                    default_factory=list,
+                    description="具体景点/餐厅/地标名称列表",
+                )
+
+            structured = llm.with_structured_output(PlaceNameList)
+            result = await structured.ainvoke([
+                SystemMessage(content=(
+                    "你是一个旅行地点提取助手。从网页搜索结果的标题和摘要中，"
+                    "提取出文章中提到的具体景点、餐厅、博物馆名称。"
+                    "输出格式为 JSON：{\"places\": [\"景点1\", \"景点2\", ...]}。\n"
+                    "规则：\n"
+                    "1. 只提取具体地点名（如「外滩」「豫园」），不要文章标题\n"
+                    "2. 每个名称必须是真实存在的景点或餐厅\n"
+                    "3. 去重，每处只列一次\n"
+                    "4. 返回5-12个"
+                )),
+                HumanMessage(content=(
+                    f"从以下关于 {destination} 的搜索结果中提取具体地点名：\n\n{snippets_text}"
+                )),
+            ])
+            return [p.strip() for p in result.places if p.strip()]
+        except Exception as exc:
+            logger.warning(
+                "Place name extraction from web results failed: %s", exc
+            )
+            return []
 
     async def _plan_serpapi_queries(
         self,
@@ -324,9 +455,14 @@ class ZhongshuItineraryAgent:
         except Exception as exc:
             evidence.append({"phase": "query_planning", "status": "error", "error": str(exc)})
 
-        fallback = [{"tool": available_tools[0] if available_tools else "search_google_maps", "query": f"{destination} {interest}", "location": destination, "reason": "deterministic fallback"} for interest in interests[:4]]
+        # Simple algorithmic fallback: "{destination} {interest}" for each interest.
+        # The LLM-based planning above is the primary path; this only runs on LLM failure.
+        # Prefer web search for discovery (finds curated attraction lists),
+        # fall back to maps search if web search isn't available.
+        pref = "search_google_web" if "search_google_web" in available_tools else (available_tools[0] if available_tools else "search_google_maps")
+        fallback = [{"tool": pref, "query": f"{destination} {interest} 景点 推荐", "location": destination, "reason": "deterministic fallback"} for interest in interests[:4]]
         if not fallback:
-            fallback = [{"tool": available_tools[0] if available_tools else "search_google_maps", "query": destination, "location": destination, "reason": "deterministic fallback"}]
+            fallback = [{"tool": pref, "query": f"{destination} 必去景点 推荐", "location": destination, "reason": "deterministic fallback"}]
         evidence.append({"phase": "query_planning_fallback", "status": "fallback", "result": fallback})
         return fallback
 
@@ -348,6 +484,7 @@ class ZhongshuItineraryAgent:
                 user_prompt=(
                     "你是中书省旅行研究员。请从 SerpAPI 候选中选择要交给高德确认的真实 POI。\n"
                     "目的地: {destination}\n兴趣: {interests}\n约束: {constraints}\n候选摘要 JSON: {candidate_summaries}\n"
+                    "重要: 若兴趣包含 food/美食，必须优先选择餐厅、小吃、夜市、美食街等饮食类 POI。\n"
                     "只返回候选中已有的 candidate_id，不要编造地点或链接。排除停车场、泛商业楼、低相关或非旅行 POI。"
                 ),
                 variables={
@@ -503,6 +640,27 @@ def _fallback_relevant_candidates(normalized: dict[str, Any], candidates: list[d
 def _candidate_dict_for_selection(normalized: dict[str, Any], candidates_by_id: dict[str, dict[str, Any]], *, limit: int = 16) -> dict[str, dict[str, Any]]:
     ranked = _fallback_relevant_candidates(normalized, list(candidates_by_id.values()))[:limit]
     return {str(item.get("_candidate_id")): item for item in ranked if item.get("_candidate_id")}
+
+
+def _amap_result_matches_city(result: Any, destination_city: str) -> bool:
+    """Return True if *result* from Amap maps_text_search contains at least one
+    POI whose city/address suggests it's actually in *destination_city*."""
+    if not isinstance(result, dict):
+        return False
+    pois = result.get("pois") or []
+    if not isinstance(pois, list) or not pois:
+        return False
+    dest = destination_city.strip()
+    for poi in pois:
+        if not isinstance(poi, dict):
+            continue
+        city = str(poi.get("cityname") or poi.get("pname") or "")
+        address = str(poi.get("address") or "")
+        name = str(poi.get("name") or "")
+        combined = f"{city} {address} {name}"
+        if dest in combined:
+            return True
+    return False
 
 
 def _candidate_relevance_score(normalized: dict[str, Any], item: dict[str, Any]) -> int:

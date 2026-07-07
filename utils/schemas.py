@@ -5,7 +5,7 @@ from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, HttpUrl, model_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 ExecutionStatus = Literal["ok", "fallback", "error"]
 DataSource = Literal["live", "structured_llm", "fallback_estimate", "unavailable"]
@@ -271,6 +271,88 @@ class WeatherExecutionResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     summary: str
     liubu_evidence: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# LLM-friendly simplified weather schemas (short field names avoid Qwen
+# inventing Chinese keys when generating structured output).
+# ---------------------------------------------------------------------------
+
+
+class SimpleWeatherDay(BaseModel):
+    """Single forecast day – short keys so the LLM rarely misses or renames them."""
+
+    date: str = ""  # "YYYY-MM-DD"
+    cond: str = "Weather unavailable"  # condition
+    lo: float = 18.0  # min_temp_c
+    hi: float = 26.0  # max_temp_c
+    rain: float = 0.2  # precipitation_probability (0-1)
+    suit: str = "Use flexible scheduling."  # activity_suitability
+    wear: list[str] = Field(default_factory=list)  # clothing_advice
+    alert: list[str] = Field(default_factory=list)  # warnings
+    est: bool = True  # is_estimated
+
+    @field_validator("wear", "alert", mode="before")
+    @classmethod
+    def _coerce_str_to_list(cls, v: Any) -> list[str]:
+        """Qwen sometimes emits a single string instead of a list – wrap it."""
+        if isinstance(v, str):
+            return [v]
+        if isinstance(v, list):
+            return [str(item) for item in v]
+        return []
+
+
+class SimpleWeatherOutput(BaseModel):
+    """Top-level weather result the LLM must return – flat, minimal keys."""
+
+    dest: str = ""  # destination city name
+    days: list[SimpleWeatherDay] = Field(default_factory=list)
+    pack: list[str] = Field(default_factory=list)  # packing_list
+    warn: list[str] = Field(default_factory=list)  # warnings
+    note: str = ""  # summary
+
+    @field_validator("pack", "warn", mode="before")
+    @classmethod
+    def _coerce_str_to_list(cls, v: Any) -> list[str]:
+        """Qwen sometimes emits a single string instead of a list – wrap it."""
+        if isinstance(v, str):
+            return [v]
+        if isinstance(v, list):
+            return [str(item) for item in v]
+        return []
+
+    def to_weather_result(self, *, destination: str) -> WeatherExecutionResult:
+        """Convert the simple LLM output to the full domain model."""
+        converted_days: list[WeatherDayModel] = []
+        for d in self.days:
+            parsed_date: date
+            try:
+                parsed_date = date.fromisoformat(d.date) if d.date else date.today()
+            except ValueError:
+                parsed_date = date.today()
+            converted_days.append(
+                WeatherDayModel(
+                    date=parsed_date,
+                    condition=d.cond or "Weather available",
+                    min_temp_c=float(d.lo),
+                    max_temp_c=float(d.hi),
+                    precipitation_probability=float(d.rain),
+                    activity_suitability=d.suit or "Use flexible scheduling.",
+                    clothing_advice=d.wear or ["Pack light layers."],
+                    warnings=d.alert or [],
+                    is_estimated=bool(d.est),
+                )
+            )
+        return WeatherExecutionResult(
+            status="ok",
+            data_source="structured_llm",
+            destination=destination or self.dest,
+            forecast_days=converted_days,
+            packing_list=self.pack or ["phone charger", "comfortable walking shoes", "weather-appropriate layers"],
+            warnings=self.warn or [],
+            summary=self.note or "Weather guidance generated from live research context.",
+        )
 
 
 class CalendarEventModel(BaseModel):

@@ -36,6 +36,21 @@ def build_mcp_client(server_names: list[str] | None = None) -> MultiServerMCPCli
             "transport": "streamable_http",
         }
 
+    if (not requested or "rollinggo" in requested) and settings.rollinggo_mcp_key:
+        auth_headers = {"Authorization": f"Bearer {settings.rollinggo_mcp_key}"}
+        if settings.rollinggo_mcp_hotel_url:
+            config["rollinggo_hotel"] = {
+                "url": settings.rollinggo_mcp_hotel_url,
+                "transport": "streamable_http",
+                "headers": auth_headers,
+            }
+        if settings.rollinggo_mcp_flight_url:
+            config["rollinggo_flight"] = {
+                "url": settings.rollinggo_mcp_flight_url,
+                "transport": "streamable_http",
+                "headers": auth_headers,
+            }
+
     if not config:
         return None
     return MultiServerMCPClient(config)

@@ -191,21 +191,21 @@ class BudgetBureau:
         day_count = max(len(daily_plan), 1)
         nights = max(day_count - 1, 1)
         room_count = max(ceil(adults / 2), 1)
-        rate_multiplier = {"budget": 0.7, "mid_range": 1.0, "luxury": 2.0}.get(budget_level, 1.0)
         activity_total = sum(float(activity.get("estimated_cost") or 0) for day in draft.get("daily_plan", []) for activity in day.get("activities", []))
-        fallback_activity_total = activity_total or day_count * adults * 40 * rate_multiplier
-        accommodation_total = nights * room_count * 140 * rate_multiplier
-        food_total = day_count * adults * 60 * rate_multiplier
-        transport_total = day_count * adults * 25 * rate_multiplier
-        flights_total = adults * 320 if profile.get("origin_city") else 0
-        subtotal = fallback_activity_total + accommodation_total + food_total + transport_total + flights_total
+        food_daily, transport_daily = _per_diem_rates(currency, budget_level)
+        food_total = day_count * adults * food_daily
+        transport_total = day_count * adults * transport_daily
+        # Hotel & flights = 0 in fallback (no MCP data available)
+        accommodation_total = 0.0
+        flights_total = 0.0
+        subtotal = activity_total + accommodation_total + food_total + transport_total + flights_total
         line_items = [
-            {"category": "activities", "item": "Planned activity blocks", "estimated_cost": round(fallback_activity_total, 2), "currency": currency, "notes": "Estimated fallback from itinerary activity costs or per-day assumptions."},
-            {"category": "accommodation", "item": f"{nights} night(s), {room_count} room(s)", "estimated_cost": round(accommodation_total, 2), "currency": currency, "notes": "Estimated fallback; did not use real-time hotel rates."},
-            {"category": "food", "item": f"Meals for {adults} traveler(s)", "estimated_cost": round(food_total, 2), "currency": currency, "notes": "Estimated fallback food allowance."},
-            {"category": "transport", "item": "Local transit and transfers", "estimated_cost": round(transport_total, 2), "currency": currency, "notes": "Estimated fallback local transport allowance."},
-            {"category": "flights", "item": "Origin-destination transport allowance", "estimated_cost": round(flights_total, 2), "currency": currency, "notes": "Estimated fallback airfare allowance; confirm live fares before booking."},
-            {"category": "misc", "item": "Buffer and incidentals", "estimated_cost": round(max(subtotal * 0.15, 50), 2), "currency": currency, "notes": state.get("research_notes", "Fallback budget synthesis.")},
+            {"category": "activities", "item": "Planned activity blocks", "estimated_cost": round(activity_total, 2), "currency": currency, "notes": "From itinerary activity costs; no live MCP data available."},
+            {"category": "accommodation", "item": f"{nights} night(s), {room_count} room(s)", "estimated_cost": 0.0, "currency": currency, "notes": "No MCP data available in fallback mode."},
+            {"category": "food", "item": f"Meals for {adults} traveler(s)", "estimated_cost": round(food_total, 2), "currency": currency, "notes": f"Per-diem estimate: {food_daily} {currency}/person/day."},
+            {"category": "transport", "item": "Local transit and transfers", "estimated_cost": round(transport_total, 2), "currency": currency, "notes": f"Per-diem estimate: {transport_daily} {currency}/person/day."},
+            {"category": "flights", "item": "Origin-destination transport", "estimated_cost": 0.0, "currency": currency, "notes": "No MCP data available in fallback mode."},
+            {"category": "misc", "item": "Buffer and incidentals", "estimated_cost": round(max(subtotal * 0.15, 50), 2), "currency": currency, "notes": "Fallback contingency estimate."},
         ]
         total = round(sum(item["estimated_cost"] for item in line_items), 2)
         warnings = ["Budget output fell back because MCP or structured synthesis failed.", "Estimated fallback; did not use real-time data.", failure_warning]
@@ -227,20 +227,49 @@ class BudgetBureau:
         day_count = max(len(daily_plan), 1)
         nights = max(day_count - 1, 1)
         room_count = max(ceil(adults / 2), 1)
-        activity_total = sum(float(activity.get("estimated_cost") or 0) for day in daily_plan for activity in day.get("activities", []))
-        activity_total = activity_total or day_count * adults * 40
-        accommodation_total = nights * room_count * 160
-        food_total = day_count * adults * 80
-        transport_total = day_count * adults * 35
-        intercity_total = adults * 420 if profile.get("origin_city") else 0
+
+        # Activity costs: from the draft itinerary (real data, not estimated)
+        activity_total = sum(
+            float(activity.get("estimated_cost") or 0)
+            for day in daily_plan
+            for activity in day.get("activities", [])
+        )
+
+        # Food + local transport: inherently estimated per diems.
+        # These are the ONLY line items the Budget bureau owns — the rest
+        # (hotel, flights) are filled by the assemble step with real MCP data.
+        budget_level = str(profile.get("budget_level") or "mid_range")
+        food_daily, transport_daily = _per_diem_rates(currency, budget_level)
+        food_total = day_count * adults * food_daily
+        transport_total = day_count * adults * transport_daily
+
+        # Hotel & flights: deliberately set to 0 here — the assemble step
+        # replaces them with actual RollingGo / Amap results.
+        accommodation_total = 0.0
+        intercity_total = 0.0
+
         subtotal = activity_total + accommodation_total + food_total + transport_total + intercity_total
+        misc_total = round(max(subtotal * 0.12, 50), 2)
+
         line_items = [
-            {"category": "activities", "item": "Approved live itinerary activities", "estimated_cost": round(activity_total, 2), "currency": currency, "notes": "Planning allowance based on approved live itinerary places."},
-            {"category": "accommodation", "item": f"{nights} night(s), {room_count} room(s)", "estimated_cost": round(accommodation_total, 2), "currency": currency, "notes": "Planning allowance aligned to live destination hotel search context."},
-            {"category": "food", "item": f"Meals for {adults} traveler(s)", "estimated_cost": round(food_total, 2), "currency": currency, "notes": "Planning allowance for destination dining blocks."},
-            {"category": "transport", "item": "Local transit and transfers", "estimated_cost": round(transport_total, 2), "currency": currency, "notes": "Planning allowance for city transit between approved places."},
-            {"category": "flights", "item": "Origin-destination transport allowance", "estimated_cost": round(intercity_total, 2), "currency": currency, "notes": "Planning allowance for confirmed origin and destination airports."},
-            {"category": "misc", "item": "Buffer and incidentals", "estimated_cost": round(max(subtotal * 0.12, 50), 2), "currency": currency, "notes": "Contingency allowance for reservations and schedule adjustments."},
+            {"category": "activities", "item": "Approved live itinerary activities",
+             "estimated_cost": round(activity_total, 2), "currency": currency,
+             "notes": "From approved live itinerary; confirm ticket prices before booking."},
+            {"category": "accommodation", "item": f"{nights} night(s), {room_count} room(s)",
+             "estimated_cost": 0.0, "currency": currency,
+             "notes": "PENDING — will be replaced with live hotel rates after accommodation search."},
+            {"category": "food", "item": f"Meals for {adults} traveler(s)",
+             "estimated_cost": round(food_total, 2), "currency": currency,
+             "notes": f"Per-diem estimate: {food_daily} {currency}/person/day ({budget_level})."},
+            {"category": "transport", "item": "Local transit and transfers",
+             "estimated_cost": round(transport_total, 2), "currency": currency,
+             "notes": f"Per-diem estimate: {transport_daily} {currency}/person/day ({budget_level})."},
+            {"category": "flights", "item": "Origin-destination transport",
+             "estimated_cost": 0.0, "currency": currency,
+             "notes": "PENDING — will be replaced with live flight prices after flight search."},
+            {"category": "misc", "item": "Buffer and incidentals",
+             "estimated_cost": misc_total, "currency": currency,
+             "notes": "Contingency for reservations, schedule changes, and incidentals."},
         ]
         total = round(sum(item["estimated_cost"] for item in line_items), 2)
         warnings: list[str] = []
@@ -255,3 +284,28 @@ class BudgetBureau:
             total_estimated_cost=total,
             warnings=warnings,
         ).model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
+# Per-diem rate table — single source of truth for food + local transport.
+# These are *inherently estimates* (no MCP tool can predict meal costs),
+# but they're centralized here so every code path uses the same baseline.
+# ---------------------------------------------------------------------------
+
+
+def _per_diem_rates(currency: str, budget_level: str) -> tuple[float, float]:
+    """Return (food_daily, transport_daily) in *currency* for *budget_level*.
+
+    The rates are rough daily per-person estimates derived from general travel
+    norms.  Hotel and flight costs are NOT handled here — those come from live
+    MCP data filled in by the assemble step.
+    """
+    # Base rates in CNY — domestic China, mid-range
+    base = {"food": 100.0, "transport": 50.0}
+    multiplier = {"budget": 0.5, "mid_range": 1.0, "luxury": 2.0}.get(budget_level, 1.0)
+    food = base["food"] * multiplier
+    transport = base["transport"] * multiplier
+    if currency != "CNY":
+        food = round(food / 7.2, 2)
+        transport = round(transport / 7.2, 2)
+    return food, transport

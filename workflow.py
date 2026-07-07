@@ -591,11 +591,85 @@ class ProvinceWorkflow:
             }
             self._emit_progress("shangshu_assemble", "done", "fallback outputs blocked before final delivery", result)
             return result
+        execution_results = self._enrich_budget_with_real_data(state.get("execution_results", {}))
         assembled = self.orchestrator.assemble_outputs(context)
-        package = self.build_final_package(PlanningRequest.model_validate(state["request"]), assembled, state["draft_packet"], state["review_packet"], state.get("execution_results", {}), self.artifact_dir)
+        package = self.build_final_package(PlanningRequest.model_validate(state["request"]), assembled, state["draft_packet"], state["review_packet"], execution_results, self.artifact_dir)
         result = {"context": context, "status": "DONE", "final_package": package.model_dump(mode="json")}
         self._emit_progress("shangshu_assemble", "done", "final package assembled", result)
         return result
+
+    @staticmethod
+    def _enrich_budget_with_real_data(execution_results: dict[str, Any]) -> dict[str, Any]:
+        """Replace budget hotel/flight line items with real MCP prices.
+
+        The Budget bureau runs in parallel with Accommodation / Flight Transport,
+        so its initial line items have 0.0 for hotels and flights.  After all
+        bureaus complete, this method fills in the actual prices.
+        """
+        budget = execution_results.get("BUDGET")
+        accommodation = execution_results.get("ACCOMMODATION")
+        flight = execution_results.get("FLIGHT_TRANSPORT")
+        if not budget or not isinstance(budget, dict):
+            return execution_results
+
+        breakdown = list(budget.get("budget_breakdown", []))
+        if not breakdown:
+            return execution_results
+
+        # Extract real hotel nightly rates
+        real_hotel_rates: list[float] = []
+        if accommodation and isinstance(accommodation, dict):
+            for hotel in accommodation.get("hotel_options", []):
+                rate = hotel.get("nightly_rate")
+                if rate and isinstance(rate, (int, float)) and rate > 0:
+                    real_hotel_rates.append(float(rate))
+
+        # Extract real flight per-person prices
+        real_flight_prices: list[float] = []
+        if flight and isinstance(flight, dict):
+            for opt in flight.get("flight_options", []):
+                price = opt.get("price")
+                if price and isinstance(price, (int, float)) and price > 0:
+                    real_flight_prices.append(float(price))
+
+        enriched = dict(budget)
+        new_breakdown = []
+        currency = str(budget.get("currency", "CNY"))
+
+        for item in breakdown:
+            category = str(item.get("category", ""))
+            if category == "accommodation" and real_hotel_rates:
+                avg_nightly = round(sum(real_hotel_rates) / len(real_hotel_rates), 2)
+                new_item = dict(item)
+                # Keep the nightly rate as the estimated cost (nights/rooms are
+                # implicit from the item description — the user can multiply).
+                new_item["estimated_cost"] = avg_nightly
+                new_item["notes"] = (
+                    f"Real-time average from {len(real_hotel_rates)} hotels "
+                    f"({avg_nightly} {currency}/night). "
+                    f"Multiply by nights × rooms for total."
+                )
+                new_breakdown.append(new_item)
+            elif category == "flights" and real_flight_prices:
+                avg_price = round(sum(real_flight_prices) / len(real_flight_prices), 2)
+                new_item = dict(item)
+                new_item["estimated_cost"] = avg_price
+                new_item["notes"] = (
+                    f"Real-time average from {len(real_flight_prices)} flights "
+                    f"({avg_price} {currency}/person). "
+                    f"Multiply by number of travelers for total."
+                )
+                new_breakdown.append(new_item)
+            else:
+                new_breakdown.append(dict(item))
+
+        new_total = round(sum(float(i.get("estimated_cost", 0)) for i in new_breakdown), 2)
+        enriched["budget_breakdown"] = new_breakdown
+        enriched["total_estimated_cost"] = new_total
+
+        enriched_results = dict(execution_results)
+        enriched_results["BUDGET"] = enriched
+        return enriched_results
 
     def _fallback_delivery_sources(
         self,
@@ -924,7 +998,8 @@ def build_markdown(request: PlanningRequest, draft_packet: dict[str, Any], revie
                 map_label = "Search" if activity.get("link_confidence") == "search_fallback" else "Map"
                 line += f" | [{map_label}]({activity['map_link']})"
             if activity.get("booking_link"):
-                booking_label = "Official" if activity.get("link_confidence") in {"canonical", "provider_result"} else "Booking"
+                conf = activity.get("link_confidence", "")
+                booking_label = "Official" if conf == "canonical" else ("Website" if conf == "provider_result" else "Link")
                 line += f" | [{booking_label}]({activity['booking_link']})"
             lines.append(line)
             lines.append(f"  - {activity['description']}")
