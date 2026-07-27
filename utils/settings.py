@@ -67,6 +67,7 @@ class AppSettings(BaseModel):
     amap_mcp_url: str | None = Field(default_factory=_default_amap_mcp_url)
     serpapi_api_key: str | None = Field(default_factory=lambda: os.getenv("SERPAPI_API_KEY"))
     serpapi_mcp_url: str | None = Field(default_factory=lambda: os.getenv("SERPAPI_MCP_URL"))
+    bocha_api_key: str | None = Field(default_factory=lambda: os.getenv("BOCHA_API_KEY"))
     rollinggo_mcp_key: str | None = Field(default_factory=lambda: os.getenv("ROLLINGGO_MCP_KEY"))
     rollinggo_mcp_hotel_url: str | None = Field(
         default_factory=lambda: os.getenv("ROLLINGGO_MCP_HOTEL_URL") or os.getenv("ROLLINGGO_MCP_HOTER_URL")

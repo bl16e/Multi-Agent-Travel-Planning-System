@@ -15,19 +15,24 @@ def build_mcp_client(server_names: list[str] | None = None) -> MultiServerMCPCli
     requested = set(server_names or [])
     config: dict[str, dict[str, object]] = {}
 
-    if (not requested or "serpapi" in requested) and settings.serpapi_api_key:
+    if (not requested or "serpapi" in requested) and (settings.serpapi_api_key or settings.bocha_api_key):
         if settings.serpapi_mcp_url:
             config["serpapi"] = {
                 "url": settings.serpapi_mcp_url,
                 "transport": "streamable_http",
             }
         else:
+            env = {"PYTHONUTF8": "1"}
+            if settings.serpapi_api_key:
+                env["SERPAPI_API_KEY"] = settings.serpapi_api_key
+            if settings.bocha_api_key:
+                env["BOCHA_API_KEY"] = settings.bocha_api_key
             config["serpapi"] = {
                 "command": "python",
                 "args": [SERPAPI_SERVER_PATH],
                 "transport": "stdio",
                 "cwd": PROJECT_ROOT,
-                "env": {"PYTHONUTF8": "1", "SERPAPI_API_KEY": settings.serpapi_api_key},
+                "env": env,
             }
 
     if (not requested or "amap" in requested) and settings.amap_mcp_url:

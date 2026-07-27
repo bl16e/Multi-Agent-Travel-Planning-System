@@ -227,6 +227,7 @@ async def test_draft_itinerary_uses_serpapi_discovery_then_amap_confirmation(mon
 
     assert seen["agent"] == "ZHONGSHU"
     assert seen["categories"] == {
+        "web_search_discovery",
         "global_place_discovery",
         "semantic_local_discovery",
         "domestic_poi_confirmation",

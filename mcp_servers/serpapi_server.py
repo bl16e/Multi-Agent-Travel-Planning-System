@@ -40,6 +40,69 @@ async def _search(params: dict[str, str]) -> dict:
         return response.json()
 
 
+async def _bocha_web_search(query: str, *, freshness: str = "noLimit", count: int = 10) -> dict:
+    if not settings.bocha_api_key:
+        raise ValueError("BOCHA_API_KEY is not configured.")
+
+    endpoint = "https://api.bochaai.com/v1/web-search?utm_source=bocha-mcp-local"
+    payload = {
+        "query": query,
+        "summary": True,
+        "freshness": freshness,
+        "count": min(max(count, 1), 50),
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.bocha_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            response = await client.post(endpoint, headers=headers, json=payload)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            error = exc.response.text.replace(str(settings.bocha_api_key), "<redacted>")
+            return {
+                "status": "error",
+                "http_status": exc.response.status_code,
+                "error": error,
+                "search_metadata": {"provider": "bocha"},
+            }
+        except httpx.RequestError as exc:
+            return {
+                "status": "error",
+                "error": f"Error communicating with Bocha Web Search API: {exc}",
+                "search_metadata": {"provider": "bocha"},
+            }
+
+    raw = response.json()
+    values = (((raw.get("data") or {}).get("webPages") or {}).get("value") or [])
+    organic_results = []
+    for index, item in enumerate(values[: payload["count"]]):
+        if not isinstance(item, dict):
+            continue
+        organic_results.append(
+            {
+                "position": index + 1,
+                "title": item.get("name") or "",
+                "link": item.get("url") or "",
+                "snippet": item.get("summary") or "",
+                "date": item.get("datePublished") or "",
+                "source": item.get("siteName") or "",
+                "thumbnail": item.get("siteIcon") or item.get("imageUrl") or "",
+            }
+        )
+
+    return {
+        "search_metadata": {
+            "provider": "bocha",
+            "status": "ok",
+        },
+        "search_parameters": payload,
+        "organic_results": organic_results,
+    }
+
+
 @mcp.tool()
 async def search_google_flights(
     departure_id: str,
@@ -158,7 +221,9 @@ async def search_local_places(query: str, location: str = "") -> dict:
 
 @mcp.tool()
 async def search_google_web(query: str, num: int = 10) -> dict:
-    """Search Google web results — use this to discover recommended attractions,
+    """Search Bocha web results; kept under the historical tool name for compatibility.
+
+    Use this to discover recommended attractions,
     top sights, and travel guides for a destination BEFORE pinpointing them on
     a map.
 
@@ -166,16 +231,7 @@ async def search_google_web(query: str, num: int = 10) -> dict:
     curated lists of real places, then use search_google_maps or maps_text_search
     to get exact addresses and links for each place.
     """
-    return await _search(
-        {
-            "engine": "google",
-            "q": query,
-            "num": str(min(max(num, 1), 20)),
-            "api_key": settings.serpapi_api_key,
-            "hl": "zh-CN",
-            "gl": "cn",
-        }
-    )
+    return await _bocha_web_search(query, count=num)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
